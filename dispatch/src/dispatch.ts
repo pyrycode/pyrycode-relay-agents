@@ -659,10 +659,12 @@ async function dispatchToAgent(
 
     let localEqualsOrigin: boolean | undefined;
     let localIsAncestorOfOrigin: boolean | undefined;
+    let localSha = "";
+    let originSha = "";
     if (localExists && remoteExists) {
       try {
-        const localSha = execSync(`git rev-parse ${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
-        const originSha = execSync(`git rev-parse origin/${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
+        localSha = execSync(`git rev-parse ${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
+        originSha = execSync(`git rev-parse origin/${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
         localEqualsOrigin = localSha === originSha;
         if (!localEqualsOrigin) {
           // `git merge-base --is-ancestor A B` exits 0 if A is an ancestor of B.
@@ -707,9 +709,37 @@ async function dispatchToAgent(
           console.log(`   🚀 Fast-forwarded local ${branchName} to origin/${branchName}`);
           break;
         case "abort-local-ahead-of-origin": {
-          const msg = `Local \`${branchName}\` has commits not present on origin/${branchName}. A prior dispatch likely failed to push and we didn't notice. Manual triage: investigate the local branch (\`git log origin/${branchName}..${branchName}\`), decide whether to push the missing commits or discard them, then strip \`error:${agent.name}\` to retry.`;
+          const msg = `Local \`${branchName}\` has commits not present on origin/${branchName}. A prior dispatch likely failed to push and we didn't notice. Manual triage required: decide whether to push the missing commits or discard them, then strip \`error:${agent.name}\` to retry.`;
           console.error(`   ❌ ${msg}`);
-          await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\n${msg}`);
+
+          // Capture the diverged commits inline so the operator doesn't
+          // need SSH access to the dispatcher machine to diagnose. Cap
+          // the listing at 30 entries / 2KB so a runaway local branch
+          // doesn't bloat the issue comment. (review #18)
+          let divergedSummary = "";
+          try {
+            const log = execSync(
+              `git log --oneline -n 30 origin/${branchName}..${branchName}`,
+              { cwd: repoRoot, encoding: "utf-8", timeout: 15_000 },
+            ).trim();
+            if (log) {
+              const truncated = log.length > 2000 ? log.slice(0, 2000) + "\n…(truncated)" : log;
+              divergedSummary =
+                `\n\n**Diverged commits** (local has, origin/${branchName} doesn't):\n` +
+                "```\n" + truncated + "\n```\n";
+            }
+          } catch (e: any) {
+            divergedSummary = `\n\n_(could not capture diverged commits: ${e?.message ?? e})_`;
+          }
+
+          const shaInfo = (localSha && originSha)
+            ? `\n\n- Local SHA: \`${localSha}\`\n- Origin SHA: \`${originSha}\``
+            : "";
+
+          await client.addComment(
+            item.issueNumber,
+            `## ⚠️ Dispatch Error: ${agent.name}\n\n${msg}${shaInfo}${divergedSummary}`,
+          );
           try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
           return;
         }
