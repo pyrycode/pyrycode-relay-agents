@@ -16,6 +16,22 @@ pyrycode-relay/                       (Go repo, public)
     └── dispatch/                     (the TS dispatcher)
 ```
 
+## Syncing from upstream
+
+Bug fixes to the dispatcher land in `pyrycode/agents` first; we cherry-pick the generic ones into this fork. Sync recipe (run before each session of relay-pipeline work):
+
+```bash
+cd /Users/juhanailmoniemi/Workspace/Projects/pyrycode-relay/agents
+git fetch upstream main
+git log --oneline HEAD..upstream/main          # see what's new in upstream
+git cherry-pick <sha>                          # for each generic commit
+git push origin main
+```
+
+The `upstream` remote points at `https://github.com/pyrycode/agents`. Skip pyrycode-CLI-specific commits (e.g. anything that touches `agents/po/CLAUDE.md`'s qmd queries with `pyrycode-docs` collection, or pyrycode-flavoured architect spec patterns). Cherry-pick everything else.
+
+If a cherry-pick conflicts on relay-specific customisations (Repo Context section in agent CLAUDE.md, README), resolve in favour of the relay version, then commit.
+
 ## Differences from `pyrycode/agents`
 
 - Each role's `CLAUDE.md` has a "Repo Context" section noting the relay's internet-exposed, stateless, security-sensitive nature.
