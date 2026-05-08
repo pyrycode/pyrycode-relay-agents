@@ -1185,6 +1185,19 @@ async function dispatchToAgent(
 // Runs BEFORE auto-advance and rework routing so we never waste an advance
 // or a route on a closed ticket.
 
+// Track (issueNumber, label) combinations that have already produced a
+// cleanup-failure warning, so a permanently-stuck cleanup (renamed label,
+// stale ID) doesn't spam the dispatcher logs every cycle. One warning per
+// process lifetime per (issue, label) pair — restart re-arms.
+const cleanupWarnedKeys = new Set<string>();
+
+function warnOnceCleanup(issueNumber: number, label: string, kind: string, e: unknown): void {
+  const key = `${issueNumber}:${label}:${kind}`;
+  if (cleanupWarnedKeys.has(key)) return;
+  cleanupWarnedKeys.add(key);
+  console.warn(`   ⚠️  ${kind} failed for #${issueNumber} label="${label}" (further occurrences silenced this session): ${(e as any)?.message ?? e}`);
+}
+
 async function runClosedSweep(client: GitHubProjectClient): Promise<void> {
   try {
     const closed = await client.getClosedItemsNotInDone();
@@ -1193,7 +1206,9 @@ async function runClosedSweep(client: GitHubProjectClient): Promise<void> {
         await client.updateItemStatus(item.id, "Done");
         console.log(`   ✓ Closed-sweep: moved #${item.issueNumber} (${item.status} → Done)`);
       } catch (e) {
-        console.warn(`   ⚠️  Failed to move closed #${item.issueNumber} to Done: ${e}`);
+        // Status updates aren't keyed on a label, but we still want
+        // sampling so a permanently-failing item doesn't spam.
+        warnOnceCleanup(item.issueNumber, item.status ?? "<no-status>", "closed-sweep status update", e);
       }
     }
   } catch (error: any) {
@@ -1234,10 +1249,13 @@ async function runDoneCleanup(client: GitHubProjectClient): Promise<void> {
     for (const label of cleanup.labelsToStrip) {
       try {
         await client.removeLabel(cleanup.issueNumber, label);
-      } catch {
-        // Soft-fail: label may have been removed by another path
-        // (auto-merge cleanup, manual edit) between the fetch and this
-        // op. Idempotency carries us through.
+      } catch (e) {
+        // Soft-fail by design: label may have been removed by another
+        // path (auto-merge cleanup, manual edit) between fetch and op.
+        // BUT: a permanently-stuck removal (renamed label, stale ID)
+        // would loop silently every cycle. Sample warnings via
+        // warnOnceCleanup so the bug becomes visible.
+        warnOnceCleanup(cleanup.issueNumber, label, "Done-cleanup removeLabel", e);
       }
     }
     console.log(`   🧹 Done-cleanup: stripped ${cleanup.labelsToStrip.length} pipeline label(s) from #${cleanup.issueNumber}`);
