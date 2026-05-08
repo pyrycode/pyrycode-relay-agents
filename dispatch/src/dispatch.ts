@@ -1030,11 +1030,17 @@ async function dispatchToAgent(
     }
   }
 
-  // Ensure main repo is on main branch (PO may have left it elsewhere)
+  // Ensure main repo is on main branch (PO may have left it elsewhere).
+  // Non-fatal — the next dispatch's setup at line 533 re-runs `git checkout
+  // main`. But surface failures so a checkout problem (untracked-file
+  // collision, missing branch, dirty tree) is visible before the next
+  // cycle silently wallpapers over it.
   if (!useWorktree) {
     try {
       execSync(`git checkout main`, { cwd: repoRoot, stdio: "pipe" });
-    } catch {}
+    } catch (e: any) {
+      console.warn(`   ⚠️  Failed to return repoRoot to main after PO run: ${e?.message ?? e}`);
+    }
   }
 }
 
@@ -1342,10 +1348,17 @@ async function pollLoop(): Promise<void> {
             `gh pr merge ${prNumber} --merge --delete-branch`,
             { cwd: repoRoot, encoding: "utf-8", timeout: 30_000 }
           );
-          // Pull merged changes to local main
+          // Pull merged changes to local main. Failure is non-fatal — the
+          // PR already merged on origin, so the next cycle's dispatch will
+          // re-pull and recover. But silent swallowing leaves stale local
+          // main propagating through subsequent cycles' dispatch setup
+          // (line 533) where the same `try {}` would swallow it again.
+          // Surface so operators see it in dispatcher logs.
           try {
             execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe", timeout: 15_000 });
-          } catch {}
+          } catch (e: any) {
+            console.warn(`   ⚠️  Post-merge git pull failed (will retry next cycle): ${e?.message ?? e}`);
+          }
 
           // Clean up pipeline labels — they're noise on completed tickets.
           for (const label of item.labels) {
