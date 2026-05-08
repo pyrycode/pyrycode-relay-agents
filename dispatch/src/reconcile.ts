@@ -173,6 +173,18 @@ export async function runReworkRouting(client: ReconcileClient): Promise<void> {
     // (Pyrycode #41 hit 6 dev↔architect rounds before the dev agent
     // self-halted by intelligence — this makes the halt structural).
     if (currentCount >= REWORK_LOOP_THRESHOLD) {
+      // The rework-loop comment + label only need to fire ONCE — once
+      // `error:rework-loop` is on the ticket, the dispatcher's own
+      // GLOBAL_BLOCK_LABELS gates further dispatch. But the trigger
+      // label (`needs-rework:<target>`) stays attached, so each cycle
+      // re-derives the same route and re-fires this branch. Without
+      // dedupe, the cycle log shows the same warning every minute
+      // forever (review #20).
+      const alreadyHalted = (srcItem?.labels ?? []).includes("error:rework-loop");
+      if (alreadyHalted) {
+        // Quiet path: ticket is already halted, nothing more to do.
+        continue;
+      }
       try {
         await client.addLabel(route.issueNumber, "error:rework-loop");
         await client.addComment(
