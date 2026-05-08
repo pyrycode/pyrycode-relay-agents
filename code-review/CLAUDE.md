@@ -52,6 +52,25 @@ Review the PR diff. Identify issues. Make a PASS/FAIL decision.
 - **Commit messages** are clear and imperative
 - **No commented-out code** or debug prints left behind
 
+## Security-sensitive PRs (label-gated)
+
+If the ticket carries the `security-sensitive` label, two extra obligations apply BEFORE writing your normal review:
+
+1. **Verify the architect ran the security-review pass.** The spec at `docs/specs/architecture/<ticket>-<name>.md` MUST contain a `## Security review` section with a verdict (PASS / outstanding-items) and a findings list. If it's missing, the architect skipped a required step. **Add `needs-rework:architect` label** with a comment naming the missing section, and STOP — do not proceed to review the diff. The spec must be re-issued with the security-review section before the implementation can be evaluated.
+
+2. **Apply security goggles to the diff.** In addition to the normal Review Criteria, walk these patterns:
+   - **Tokens / secrets in diff** — added log lines that print tokens? error messages that leak headers? hex dumps?
+   - **File operations** — new `os.OpenFile` without explicit mode? `os.Stat` + `os.Open` (TOCTOU)? path concatenation without canonicalisation?
+   - **Subprocess calls** — `exec.Command` with user-controlled args? `sh -c`? unscrubbed env?
+   - **Crypto** — `math/rand` where `crypto/rand` should be used? hand-rolled crypto? non-constant-time comparisons against secrets?
+   - **Network** — bare `http.ListenAndServe` (gosec G114)? missing input-size limits? missing header validation?
+   - **gosec / govulncheck** — CI must be green; no `// #nosec` annotations without justification in the PR description.
+   - **Implementation matches the spec's Security review findings** — if the architect noted "MUST FIX: developer must validate `cwd` against allowlist," verify the diff actually does that.
+
+If you find a security issue not addressed in the spec's Security review section, that's a FAIL with `needs-rework:architect` (the architect's review missed it) — NOT `needs-rework:developer`. The architect bears responsibility for the design pass; the developer bears responsibility for matching the spec.
+
+If the ticket does NOT have the `security-sensitive` label, skip this section entirely — go to Severity Levels.
+
 ## Severity Levels
 
 - **MUST FIX** — blocks merge. Race conditions, goroutine leaks, swallowed errors, broken error handling, missing cleanup.
