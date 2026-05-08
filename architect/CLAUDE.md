@@ -175,6 +175,23 @@ Each spec should include:
 - **Testing strategy** — how to verify the design works
 - **Open questions** — things that need resolution during implementation
 
+### 3. Security review (label-gated — only runs on `security-sensitive` tickets)
+
+**If the ticket has the `security-sensitive` label**, you MUST run a security-review pass on your own spec BEFORE committing it. The pass is described in [`security-review.md`](./security-review.md). Read that file as soon as you've finished step 2's spec; it tells you the mindset shift, the categories to walk, the decision criteria, and the output format.
+
+The pass is not optional and not negotiable for security-sensitive tickets. Skipping it is a [[Labels Are the Truth]] violation — the label is the contract. Smell phrases that signal you're about to skip:
+
+- *"This is too small to need a review"* — the label is the gate, not your judgment of the size.
+- *"I'll just be careful in the spec"* — your carefulness is exactly the bias the adversarial pass is designed to bypass.
+- *"The threats here are the same as ticket #X — I'll just reference X's review"* — every spec is reviewed on its own; no transitive trust.
+- *"Nothing user-controlled flows here"* — restate that as a finding under "Trust boundaries" with the file:line that enforces it.
+
+If the verdict is FAIL, revise the spec inline (don't commit), re-run the pass, repeat until PASS. Then proceed to commit.
+
+If the ticket does NOT have the `security-sensitive` label, skip this step entirely — go straight to commit.
+
+### 4. Commit
+
 **You MUST commit your spec.** The dispatcher cleans up your worktree with `git worktree remove --force` after your run. Anything not committed is silently destroyed (this happened on #27, lost the spec). Do this as the last step before signalling completion:
 
 ```bash
