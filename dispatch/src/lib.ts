@@ -581,23 +581,46 @@ export function extractRateLimitInfo(err: unknown): {
   isRateLimited: true;
   resetUnixSeconds: number | null;
 } | null {
-  // Extract the message text from Error, string, or {message} shapes.
-  let message: string;
-  if (err instanceof Error) message = err.message;
-  else if (typeof err === "string") message = err;
-  else if (err && typeof err === "object" && "message" in err && typeof (err as any).message === "string") {
-    message = (err as any).message;
-  } else {
-    return null;
+  // Octokit shape — status + headers — is the most reliable signal.
+  // GitHub localizes error message text and changes wording; relying on
+  // the english "API rate limit … exceeded" string was a single point
+  // of failure (review #12). Status codes are stable: 429 is the modern
+  // rate-limit response; 403 with `x-ratelimit-remaining: 0` is the
+  // legacy GraphQL flavour.
+  const status = (err as any)?.status ?? (err as any)?.response?.status;
+  const headers = (err as any)?.response?.headers ?? (err as any)?.headers;
+  const remainingRaw = headers?.["x-ratelimit-remaining"];
+  const remaining = typeof remainingRaw === "string" ? parseInt(remainingRaw, 10)
+                  : typeof remainingRaw === "number" ? remainingRaw
+                  : null;
+
+  let isRateLimited = false;
+  if (status === 429) {
+    isRateLimited = true;
+  } else if (status === 403 && remaining === 0) {
+    isRateLimited = true;
   }
 
-  if (!message.includes("API rate limit") || !message.includes("exceeded")) {
-    return null;
+  // Fallback for non-Octokit error shapes (Error from a thrown string,
+  // wrapped library errors that drop status/headers): match the legacy
+  // english text. Future localization breaks this fallback but the
+  // status-code path above stays correct.
+  if (!isRateLimited) {
+    let message: string | null = null;
+    if (err instanceof Error) message = err.message;
+    else if (typeof err === "string") message = err;
+    else if (err && typeof err === "object" && "message" in err && typeof (err as any).message === "string") {
+      message = (err as any).message;
+    }
+    if (message && message.includes("API rate limit") && message.includes("exceeded")) {
+      isRateLimited = true;
+    }
   }
+
+  if (!isRateLimited) return null;
 
   let resetUnixSeconds: number | null = null;
-  const response = (err as any)?.response;
-  const headerValue = response?.headers?.["x-ratelimit-reset"];
+  const headerValue = headers?.["x-ratelimit-reset"];
   if (typeof headerValue === "string") {
     const parsed = parseInt(headerValue, 10);
     if (!isNaN(parsed)) resetUnixSeconds = parsed;

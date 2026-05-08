@@ -2075,6 +2075,46 @@ describe("extractRateLimitInfo", () => {
       true,
     );
   });
+
+  test("HTTP 429 status → detected even without english 'rate limit' message", () => {
+    // GitHub localizes error message text and changes wording. Status
+    // codes are stable and language-independent.
+    const err: any = new Error("Demande limitée");  // hypothetical localized message
+    err.status = 429;
+    err.response = { headers: { "x-ratelimit-reset": "1777793956" } };
+    const info = extractRateLimitInfo(err);
+    assert.equal(info?.isRateLimited, true);
+    assert.equal(info?.resetUnixSeconds, 1777793956);
+  });
+
+  test("HTTP 403 + x-ratelimit-remaining: 0 → detected (legacy GraphQL flavour)", () => {
+    const err: any = new Error("Forbidden");
+    err.status = 403;
+    err.response = { headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777793956" } };
+    assert.equal(extractRateLimitInfo(err)?.isRateLimited, true);
+  });
+
+  test("HTTP 403 with remaining > 0 → not rate-limited", () => {
+    // Plain 403 (auth issue, scope problem) — not a rate-limit response.
+    const err: any = new Error("Forbidden");
+    err.status = 403;
+    err.response = { headers: { "x-ratelimit-remaining": "4500" } };
+    assert.equal(extractRateLimitInfo(err), null);
+  });
+
+  test("HTTP 200 + 'API rate limit exceeded' message → falls back to text match", () => {
+    // Some library wrappers strip status; the english fallback must
+    // still detect the legacy phrasing.
+    const err = new Error("API rate limit exceeded");
+    assert.equal(extractRateLimitInfo(err)?.isRateLimited, true);
+  });
+
+  test("status nested under err.response.status → detected", () => {
+    // Some Octokit shapes put status on err.response, not directly on err.
+    const err: any = new Error("");
+    err.response = { status: 429, headers: {} };
+    assert.equal(extractRateLimitInfo(err)?.isRateLimited, true);
+  });
 });
 
 describe("shouldAddReadyLabel", () => {
