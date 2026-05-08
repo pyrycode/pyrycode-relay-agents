@@ -936,6 +936,28 @@ export function isPipelineLabel(label: string): boolean {
 }
 
 /**
+ * True if the given label is a pipeline-state label for the given agent
+ * specifically (e.g. `error:developer` is for `developer`, not for any
+ * other agent).
+ *
+ * The pre-dispatch strip loop uses this to scope cleanup to labels for the
+ * agent we're about to run — without it, dispatching `architect` would
+ * silently strip a `error:developer` that a prior dev run left as a
+ * human-actionable signal. The pattern surfaced in the 2026-05-08 review
+ * (#9): "labels are the truth" cuts both ways — stripping another agent's
+ * signal IS a state mutation that the agent never authorized.
+ *
+ * shouldSkipDispatch already blocks the candidate when the SAME agent's
+ * label is present, so the strip is purely defensive against state-drift
+ * (e.g. label arrived between candidate selection and dispatch). Scoping
+ * to the agent's own labels means the strip can't accidentally erase
+ * another agent's state.
+ */
+export function isPipelineLabelForAgent(label: string, agentName: string): boolean {
+  return PIPELINE_LABEL_PREFIXES.some((p) => label === p + agentName);
+}
+
+/**
  * Pipeline labels that block dispatch for ALL agents (not scoped to a
  * specific agent's name). Until any of these is stripped, no agent should
  * re-run on the ticket.

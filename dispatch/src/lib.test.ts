@@ -28,6 +28,7 @@ import {
   resolveAgentsRepoRoot,
   resolvePyrycodeRepoRoot,
   isPipelineLabel,
+  isPipelineLabelForAgent,
   shouldSkipDispatch,
   extractReworkTarget,
   isPipelineInFlight,
@@ -106,6 +107,45 @@ describe("isPipelineLabel", () => {
     // The old labels existed before the per-agent prefix scheme.
     assert.equal(isPipelineLabel("ready-for-review"), false);
     assert.equal(isPipelineLabel("needs-rework"), false);
+  });
+});
+
+describe("isPipelineLabelForAgent", () => {
+  // The pre-dispatch strip loop must scope cleanup to the dispatching
+  // agent's labels — stripping `error:OTHER_AGENT` silently erases a
+  // human-actionable failure signal from a prior run on a different agent.
+
+  test("matches the agent's own pipeline labels", () => {
+    assert.equal(isPipelineLabelForAgent("ready:developer", "developer"), true);
+    assert.equal(isPipelineLabelForAgent("wip:developer", "developer"), true);
+    assert.equal(isPipelineLabelForAgent("error:developer", "developer"), true);
+    assert.equal(isPipelineLabelForAgent("needs-rework:developer", "developer"), true);
+  });
+
+  test("does NOT match other agents' pipeline labels (the bug)", () => {
+    // Dispatching `architect`, an `error:developer` left as a breadcrumb
+    // by a prior dev run is NOT the architect dispatch's concern.
+    assert.equal(isPipelineLabelForAgent("error:developer", "architect"), false);
+    assert.equal(isPipelineLabelForAgent("ready:po", "architect"), false);
+    assert.equal(isPipelineLabelForAgent("wip:code-review", "developer"), false);
+    assert.equal(isPipelineLabelForAgent("needs-rework:po", "developer"), false);
+  });
+
+  test("does NOT match prefix collisions (developer vs developer-foo)", () => {
+    // `error:developer-foo` should not match agent `developer`, even though
+    // the prefix `error:developer` is a substring.
+    assert.equal(isPipelineLabelForAgent("error:developer-foo", "developer"), false);
+  });
+
+  test("rejects non-pipeline labels", () => {
+    assert.equal(isPipelineLabelForAgent("bug", "developer"), false);
+    assert.equal(isPipelineLabelForAgent("size:s", "developer"), false);
+    assert.equal(isPipelineLabelForAgent("", "developer"), false);
+  });
+
+  test("rejects legacy non-prefixed labels", () => {
+    assert.equal(isPipelineLabelForAgent("needs-rework", "developer"), false);
+    assert.equal(isPipelineLabelForAgent("ready-for-review", "developer"), false);
   });
 });
 

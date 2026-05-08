@@ -11,6 +11,7 @@ import {
   resolvePyrycodeRepoRoot,
   shouldSkipDispatch,
   isPipelineLabel,
+  isPipelineLabelForAgent,
   isMergeConflictError,
   decideDoneCleanup,
   shouldAutoCommit,
@@ -1294,13 +1295,20 @@ async function pollLoop(): Promise<void> {
     }
 
     // Pre-dispatch mutations (sequential — fast, ~5 ops per candidate, mostly
-    // cache reads after the first invalidation): strip stale pipeline labels,
-    // then add wip:<agent>. Done before any dispatchToAgent fires so a slow
-    // child can't race with another candidate's prep on the same item.
+    // cache reads after the first invalidation): strip stale pipeline labels
+    // FOR THIS AGENT ONLY, then add wip:<agent>. Done before any
+    // dispatchToAgent fires so a slow child can't race with another
+    // candidate's prep on the same item.
+    //
+    // Scoped to the dispatching agent's labels (`isPipelineLabelForAgent`)
+    // — a previous version stripped ALL pipeline labels (including
+    // `error:OTHER_AGENT`), silently erasing the human-actionable failure
+    // signal from a prior run on a different agent. Other agents' labels
+    // aren't this dispatch's concern. See review #9.
     for (const { agent, item } of candidates) {
       const wipLabel = `wip:${agent.name}`;
       for (const label of item.labels) {
-        if (isPipelineLabel(label)) {
+        if (isPipelineLabelForAgent(label, agent.name)) {
           try {
             await client.removeLabel(item.issueNumber, label);
             console.log(`   🏷️  Removed stale ${label} from #${item.issueNumber}`);
