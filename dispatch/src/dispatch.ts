@@ -839,22 +839,37 @@ async function dispatchToAgent(
     if (streamResult.isError) {
       let salvaged = false;
       if (streamResult.terminalReason === "max_turns" && item.issueNumber > 0) {
+        // Query both number AND isDraft so we can skip drafts. Drafts are
+        // typically the safer-salvage helper's own output (partial work
+        // awaiting human triage); treating them as "agent finished, just
+        // out of turns on cleanup" would auto-advance partial work.
+        let prListJson: string | null = null;
         try {
-          // Query both number AND isDraft so we can skip drafts. Drafts are
-          // typically the safer-salvage helper's own output (partial work
-          // awaiting human triage); treating them as "agent finished, just
-          // out of turns on cleanup" would auto-advance partial work.
-          const prListJson = execSync(
+          prListJson = execSync(
             `gh pr list --head "${branchName}" --state open --json number,isDraft`,
             { cwd: agentCwd, encoding: "utf-8", timeout: 15_000 }
           );
+        } catch (e: any) {
+          // Distinguish gh-CLI failure from "no PR found." A transient gh
+          // failure (network, auth, rate limit) was previously swallowed
+          // and silently downgraded a possible-success outcome to
+          // `error:<agent>`, costing one human triage cycle. Surface the
+          // gh failure explicitly so the dispatcher log shows what
+          // actually happened — fall through to the error path either
+          // way (the agent did hit max_turns), but the operator now sees
+          // why the PR-existence check couldn't run.
+          const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
+          console.warn(`   ⚠️  gh pr list failed during max_turns salvage check (treating as no-PR): ${detail.slice(0, 300)}`);
+          writeLog(logFile, "SALVAGE_GH_FAILED", `gh pr list errored during salvage check; could not determine PR existence. Detail: ${detail}`);
+        }
+        if (prListJson !== null) {
           const readyPr = findReadyPrNumber(prListJson);
           if (readyPr !== null) {
             console.log(`   ⚠️  Hit max_turns but PR #${readyPr} exists (non-draft) — treating as success`);
             writeLog(logFile, "SALVAGED", `Agent hit max_turns (${streamResult.numTurns}) but ready PR #${readyPr} was already created. Treating as success.`);
             salvaged = true;
           }
-        } catch { /* gh CLI failed — fall through to error path */ }
+        }
       }
 
       // Safer salvage: max_turns + clean vet/build + uncommitted work
