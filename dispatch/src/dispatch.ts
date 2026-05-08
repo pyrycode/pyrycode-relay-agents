@@ -1,5 +1,5 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, createReadStream } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
@@ -148,12 +148,24 @@ function runClaudeStreaming(opts: {
   env: NodeJS.ProcessEnv;
 }): Promise<StreamResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c",
-      `cat "${opts.promptFile}" | claude -p --verbose --output-format stream-json --model ${opts.model} --effort ${opts.effort} --max-turns ${opts.maxTurns} --allowedTools "${opts.allowedTools}" --append-system-prompt-file "${opts.systemPromptFile}"`
+    // Spawn claude directly with argv; pipe the prompt file via stdin.
+    // Previously used `bash -c "cat ${promptFile} | claude ..."` which is
+    // fragile under any change that lets user-influenced text reach
+    // promptFile/allowedTools/systemPromptFile. argv-based spawn closes
+    // the entire shell-quoting surface (review issue #8/#22).
+    const child = spawn("claude", [
+      "-p",
+      "--verbose",
+      "--output-format", "stream-json",
+      "--model", opts.model,
+      "--effort", opts.effort,
+      "--max-turns", String(opts.maxTurns),
+      "--allowedTools", opts.allowedTools,
+      "--append-system-prompt-file", opts.systemPromptFile,
     ], {
       cwd: opts.cwd,
       env: opts.env,
-      stdio: ["inherit", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
     let buffer = "";
@@ -165,6 +177,17 @@ function runClaudeStreaming(opts: {
       appendFileSync(opts.logFile, `\n⏰ TIMEOUT — killing agent after ${opts.timeoutMs / 1000}s\n`);
       child.kill("SIGTERM");
     }, opts.timeoutMs);
+
+    // Pipe the prompt file content into claude's stdin, then close. Replaces
+    // the prior `bash -c "cat ${file} | claude ..."` which made promptFile
+    // pass through a shell quoting layer.
+    const promptStream = createReadStream(opts.promptFile);
+    promptStream.pipe(child.stdin!);
+    promptStream.on("error", (err) => {
+      clearTimeout(timer);
+      child.kill("SIGTERM");
+      reject(err);
+    });
 
     child.stdout!.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -248,13 +271,18 @@ async function buildPromptForAgent(
   const needsArchDoc = !["po"].includes(agent.name);
   if (needsArchDoc) {
     try {
-      const archFiles = execSync(`ls docs/specs/architecture/${ticketNum}-* 2>/dev/null || true`, {
-        cwd: specRoot, encoding: "utf-8",
-      }).trim();
-      if (archFiles) {
-        for (const file of archFiles.split("\n")) {
-          parts.push(`\n## Architecture Doc (from System Architect)\n${readFileSync(resolve(specRoot, file), "utf-8")}`);
-        }
+      // readdirSync + filter — no shell, no template-string, no `2>/dev/null`
+      // ENOENT swallow. The architecture dir may not exist (early-stage repo,
+      // missing scaffold) — handle that explicitly instead of through shell
+      // exit codes.
+      const archDir = resolve(specRoot, "docs/specs/architecture");
+      const prefix = `${ticketNum}-`;
+      let entries: string[] = [];
+      if (existsSync(archDir)) {
+        entries = readdirSync(archDir).filter(name => name.startsWith(prefix));
+      }
+      for (const name of entries) {
+        parts.push(`\n## Architecture Doc (from System Architect)\n${readFileSync(resolve(archDir, name), "utf-8")}`);
       }
     } catch (e) {
       console.warn(`   ⚠️  Failed to read architecture docs for #${ticketNum}: ${e}`);
@@ -869,10 +897,21 @@ async function dispatchToAgent(
         const dirty = execSync(`git status --porcelain`, { cwd: agentCwd, stdio: "pipe" }).toString();
         if (shouldAutoCommit(dirty)) {
           execSync(`git add -A`, { cwd: agentCwd, stdio: "pipe" });
-          execSync(
-            `git commit -m "${agent.name}: auto-commit uncommitted changes for #${item.issueNumber}"`,
-            { cwd: agentCwd, stdio: "pipe" },
+          // argv-based commit so agent.name (currently from a hardcoded
+          // enum, but configurability is a routine refactor away) can't
+          // ever break out of `-m`'s quoting. Same discipline used in
+          // attemptSaferSalvage's commit + push above.
+          const cm = spawnSync(
+            "git",
+            [
+              "commit",
+              "-m", `${agent.name}: auto-commit uncommitted changes for #${item.issueNumber}`,
+            ],
+            { cwd: agentCwd, stdio: "pipe", timeout: 15_000 },
           );
+          if (cm.status !== 0) {
+            throw new Error(`git commit failed: ${cm.stderr?.toString() || cm.stdout?.toString() || "unknown"}`);
+          }
           console.log(`   💾 Auto-committed uncommitted changes (agent forgot to commit)`);
         }
       } catch (e) {
