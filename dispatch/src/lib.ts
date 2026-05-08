@@ -831,6 +831,47 @@ export function decideBranchSetup(opts: {
   return "abort-local-ahead-of-origin";
 }
 
+// --------- Spawn env hygiene ---------
+
+/**
+ * Environment variables that MUST NOT be passed to spawned `claude`
+ * processes. These are dispatcher secrets and config; the spawned agent
+ * doesn't need them and shouldn't see them.
+ *
+ * `GITHUB_TOKEN` is the canonical leak case — `claude` uses `gh`'s own
+ * credential store (or `git credential helper`) for repo access; the
+ * dispatcher's token would only enable the agent to act with the
+ * dispatcher's identity (different scope, surprises in audit logs, and
+ * bypasses any per-agent token rotation later).
+ *
+ * Denylist over allowlist deliberately: `claude` relies on a wide set of
+ * env vars (PATH, HOME, LANG, LC_*, TMPDIR, NODE_*, ANTHROPIC_*, …) and
+ * an allowlist would silently break new dependencies. A small denylist
+ * keeps the secret-leak surface bounded without reducing flexibility.
+ */
+export const SPAWN_ENV_DENYLIST: ReadonlySet<string> = new Set([
+  "GITHUB_TOKEN",
+  "GITHUB_OWNER",
+  "GITHUB_REPO",
+  "PROJECT_NUMBER",
+  "DISCORD_WEBHOOK_URL",
+  "PYRY_MAX_CONCURRENT",
+  "PYRYCODE_REPO_PATH",
+]);
+
+/**
+ * Filter dispatcher secrets/config out of an env map before spawning a
+ * child agent. Returns a fresh object — does not mutate the input.
+ */
+export function scrubSpawnEnv(parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(parentEnv)) {
+    if (SPAWN_ENV_DENYLIST.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 // --------- Worktree introspection ---------
 
 /**

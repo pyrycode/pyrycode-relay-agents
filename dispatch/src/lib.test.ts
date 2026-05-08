@@ -29,6 +29,8 @@ import {
   resolvePyrycodeRepoRoot,
   isPipelineLabel,
   isPipelineLabelForAgent,
+  scrubSpawnEnv,
+  SPAWN_ENV_DENYLIST,
   shouldSkipDispatch,
   extractReworkTarget,
   isPipelineInFlight,
@@ -1839,6 +1841,57 @@ describe("decideBranchSetup", () => {
       decideBranchSetup({ localExists: true, remoteExists: true }),
       "abort-local-ahead-of-origin",
     );
+  });
+});
+
+describe("scrubSpawnEnv", () => {
+  // The dispatcher's GITHUB_TOKEN, project config, and webhook URL must
+  // not flow into spawned `claude` processes. claude has its own gh-auth
+  // credentials; passing the dispatcher's token gives the agent the
+  // dispatcher's identity and audit-log scope.
+
+  test("strips every key in SPAWN_ENV_DENYLIST", () => {
+    const input: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin",
+      HOME: "/Users/x",
+      GITHUB_TOKEN: "secret",
+      GITHUB_OWNER: "pyrycode",
+      GITHUB_REPO: "pyrycode",
+      PROJECT_NUMBER: "1",
+      DISCORD_WEBHOOK_URL: "https://discord.com/...",
+      PYRY_MAX_CONCURRENT: "2",
+      PYRYCODE_REPO_PATH: "/repo",
+    };
+    const out = scrubSpawnEnv(input);
+    for (const denied of SPAWN_ENV_DENYLIST) {
+      assert.equal(out[denied], undefined, `expected ${denied} to be stripped`);
+    }
+  });
+
+  test("preserves PATH, HOME, and other non-secret env", () => {
+    const input: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin",
+      HOME: "/Users/x",
+      LANG: "en_US.UTF-8",
+      ANTHROPIC_API_KEY: "anthropic-secret",  // user's own key, kept
+      GITHUB_TOKEN: "dispatcher-secret",       // stripped
+    };
+    const out = scrubSpawnEnv(input);
+    assert.equal(out.PATH, "/usr/bin");
+    assert.equal(out.HOME, "/Users/x");
+    assert.equal(out.LANG, "en_US.UTF-8");
+    assert.equal(out.ANTHROPIC_API_KEY, "anthropic-secret");
+    assert.equal(out.GITHUB_TOKEN, undefined);
+  });
+
+  test("does not mutate the input", () => {
+    const input: NodeJS.ProcessEnv = { GITHUB_TOKEN: "secret", PATH: "/bin" };
+    scrubSpawnEnv(input);
+    assert.equal(input.GITHUB_TOKEN, "secret"); // input untouched
+  });
+
+  test("empty input → empty output (no crash)", () => {
+    assert.deepEqual(scrubSpawnEnv({}), {});
   });
 });
 
