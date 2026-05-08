@@ -28,9 +28,17 @@ pyrycode-relay/                       (Go repo, public)
 cd dispatch
 GITHUB_OWNER=pyrycode \
 GITHUB_REPO=pyrycode-relay \
-PROJECT_NUMBER=<n> \
+PROJECT_NUMBER=3 \
 GITHUB_TOKEN=$(gh auth token) \
-pnpm dev
+pnpm start
 ```
 
-`PROJECT_NUMBER` is the GitHub Project (v2) board for the relay. Run from a separate terminal than the pyrycode CLI dispatcher; per-repo concurrency caps via `PYRY_MAX_CONCURRENT`.
+Available scripts (see `dispatch/package.json`):
+
+- `pnpm start` — run the dispatcher loop (production-like).
+- `pnpm watch` — same, with `tsx --watch` so the dispatcher restarts on source changes (for dispatcher development).
+- `pnpm test` — unit tests.
+- `pnpm typecheck` — TypeScript check.
+- `pnpm drain` — send SIGTERM to a running dispatcher; it exits cleanly after the current dispatch completes.
+
+`PROJECT_NUMBER=3` is the [Pyrycode-Relay](https://github.com/orgs/pyrycode/projects/3) board (created 2026-05-08 by copying from Pyrycode). Run from a separate terminal than the pyrycode CLI dispatcher; per-repo concurrency caps via `PYRY_MAX_CONCURRENT`.
