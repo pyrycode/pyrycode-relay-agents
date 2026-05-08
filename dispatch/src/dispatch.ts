@@ -320,13 +320,24 @@ async function buildPromptForAgent(
   const needsPr = ["code-review"].includes(agent.name);
   if (needsPr && ticketNum > 0) {
     try {
+      // Query isDraft and prefer non-draft PRs over drafts. Without this,
+      // a salvage-flow draft PR co-existing with a regular agent-opened PR
+      // on the same branch would be picked order-dependently by GitHub —
+      // code-review then reviews whichever happens to come first. Same
+      // discipline lives in `findReadyPrNumber` for the salvage path;
+      // making this site consistent (review #13).
       const prJson = execSync(
-        `gh pr list --head feature/${ticketNum} --state open --json number,url --jq '.[0]'`,
+        `gh pr list --head feature/${ticketNum} --state open --json number,url,isDraft`,
         { cwd: repoRoot, encoding: "utf-8" }
       ).trim();
-      if (prJson) {
-        const pr = JSON.parse(prJson);
-        parts.push(`\n## Pull Request\nPR #${pr.number}: ${pr.url}\nBranch: feature/${ticketNum}`);
+      const prs: { number: number; url: string; isDraft: boolean }[] =
+        prJson ? JSON.parse(prJson) : [];
+      // Prefer non-draft PRs; fall back to first PR if only drafts exist.
+      const ready = prs.find(p => p.isDraft === false);
+      const chosen = ready ?? prs[0];
+      if (chosen) {
+        const draftLabel = chosen.isDraft ? " (DRAFT — likely a salvage PR awaiting human triage)" : "";
+        parts.push(`\n## Pull Request\nPR #${chosen.number}: ${chosen.url}${draftLabel}\nBranch: feature/${ticketNum}`);
       } else {
         parts.push(`\n## Pull Request\nNo open PR found for branch feature/${ticketNum}. Check with: gh pr list --head feature/${ticketNum}`);
       }
