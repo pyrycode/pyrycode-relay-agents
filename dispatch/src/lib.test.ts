@@ -1214,27 +1214,22 @@ describe("decideDoneCleanup", () => {
 });
 
 describe("shouldSkipBlockedFor", () => {
-  test("PO is allowed on blocked tickets — refinement is cheap prep work", () => {
-    // PO refines the body shape (user story, AC, size). It doesn't
-    // depend on the blocker's implementation. Allowing PO to refine
-    // in advance means the ticket is ready to flow the moment the
-    // blocker resolves — no PO delay added on top of blocker wait.
-    assert.equal(
-      shouldSkipBlockedFor("po", [{ number: 40, state: "OPEN" }]),
-      false,
-    );
-  });
-
-  test("non-PO agents skip blocked tickets — they need the blocker's API", () => {
-    // Architect designs against the actual code. Developer implements
-    // against types that must exist on main. Code-review reads the PR
-    // diff. Documentation reads the merged feature. None can do their
-    // job until the blocker lands.
-    for (const agent of ["architect", "developer", "code-review", "documentation"]) {
+  test("ALL agents (including PO) skip blocked tickets — flipped 2026-05-08", () => {
+    // PO used to bypass the blocker check on the rationale that
+    // refinement is "cheap prep work." But PO refines from the issue
+    // body PLUS the docs — and the Documentation agent runs LAST in
+    // the pipeline, so the docs lag the code. PO refining a blocked
+    // ticket reads docs that don't yet describe the upstream's API,
+    // baking stale assumptions into AC. Flipped so PO waits like
+    // every other agent.
+    //
+    // See lib.ts's shouldSkipBlockedFor docstring + project Lessons.md
+    // for full rationale.
+    for (const agent of ["po", "architect", "developer", "code-review", "documentation"]) {
       assert.equal(
         shouldSkipBlockedFor(agent, [{ number: 40, state: "OPEN" }]),
         true,
-        `${agent} should skip blocked tickets`,
+        `${agent} should skip on OPEN blocker`,
       );
     }
   });
@@ -1245,10 +1240,25 @@ describe("shouldSkipBlockedFor", () => {
     }
   });
 
-  test("non-PO agent + all-CLOSED blockers → not skipped (dependencies satisfied)", () => {
+  test("any agent + all-CLOSED blockers → not skipped (dependencies satisfied)", () => {
+    // Once all blockers close, the gate releases for every agent.
+    for (const agent of ["po", "architect", "developer", "code-review", "documentation"]) {
+      assert.equal(
+        shouldSkipBlockedFor(agent, [{ number: 40, state: "CLOSED" }]),
+        false,
+        `${agent} should not skip when all blockers are CLOSED`,
+      );
+    }
+  });
+
+  test("any-OPEN-blocker holds even when other blockers are CLOSED", () => {
+    // Mixed state: one blocker still open. Gate stays closed.
     assert.equal(
-      shouldSkipBlockedFor("architect", [{ number: 40, state: "CLOSED" }]),
-      false,
+      shouldSkipBlockedFor("po", [
+        { number: 40, state: "CLOSED" },
+        { number: 41, state: "OPEN" },
+      ]),
+      true,
     );
   });
 });
@@ -1651,19 +1661,21 @@ describe("selectDispatches", () => {
     assert.equal(r[0].item.issueNumber, 4);
   });
 
-  test("OPEN blocker on developer ticket → skipped (PO bypasses blocker check)", () => {
+  test("OPEN blocker → skipped for ALL agents including PO (post-2026-05-08 flip)", () => {
+    // Pre-2026-05-08, PO bypassed `shouldSkipBlockedFor` so a blocked
+    // Backlog ticket would still get PO refinement. That produced
+    // stale refinements (PO refines from docs; Documentation agent
+    // runs last; docs lag the code). Flipped so PO waits.
     const r = selectDispatches({
       itemsByColumn: new Map([
-        ["Backlog", [item(1, [], [{ number: 99, state: "OPEN" }])]],          // PO bypasses
-        ["In Development", [item(2, [], [{ number: 99, state: "OPEN" }])]],    // Developer skipped
+        ["Backlog", [item(1, [], [{ number: 99, state: "OPEN" }])]],          // PO now skipped
+        ["In Development", [item(2, [], [{ number: 99, state: "OPEN" }])]],    // Developer skipped (unchanged)
       ]),
       pollOrder: POLL_ORDER,
       maxConcurrent: 2,
     });
-    // Only PO eligible (PO bypasses blockers per shouldSkipBlockedFor); developer skipped
-    assert.equal(r.length, 1);
-    assert.equal(r[0].agent.name, "po");
-    assert.equal(r[0].item.issueNumber, 1);
+    // No candidates — both columns have items but both are blocked.
+    assert.equal(r.length, 0);
   });
 
   test("CLOSED blocker → not skipped", () => {

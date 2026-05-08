@@ -673,26 +673,41 @@ export function hasOpenBlockers(
 
 /**
  * True if this dispatch attempt should be skipped because the ticket
- * has open blockers AND the agent's work depends on the blocker's API.
+ * has any open blocker. Applies uniformly to ALL agents — including PO.
  *
- * **PO bypasses this check.** Refinement (user story shape, AC, size)
- * is cheap prep work that doesn't depend on the blocker's
- * implementation. Allowing PO to refine in advance means the ticket is
- * ready to flow the moment the blocker resolves — no PO-refinement
- * delay added on top of the blocker wait.
+ * **PO is no longer exempted (2026-05-08).** The earlier design exempted
+ * PO on the rationale that refinement is "cheap prep work" — but PO
+ * actually refines from the issue body PLUS the docs (`docs/PROJECT-MEMORY.md`,
+ * `docs/knowledge/INDEX.md`, `docs/knowledge/features/*.md`). The
+ * Documentation agent runs LAST in the pipeline, so the docs only
+ * reflect a ticket's changes after that ticket auto-merges to main.
  *
- * All other agents (architect, developer, code-review, documentation)
- * need the blocker's actual code/API to exist on main. They wait.
+ * Result of the bypass: when PO refined a blocked ticket, it read docs
+ * that didn't yet describe the upstream's API / sentinels / files.
+ * Refinements baked stale assumptions that either propagated into the
+ * dependent's body verbatim (sometimes wrong post-merge) or produced a
+ * less-grounded body that architect had to bounce back via
+ * `needs-rework:po`. Net cost was throughput-negative for tight chains
+ * (refactors, dependent slices), where the upstream API IS the subject
+ * of the upstream ticket.
  *
- * Auto-advance from Backlog → In Architecture also respects the block
- * (see `decideAutoAdvance`); blocked tickets stay in Backlog with their
- * `ready:po` label until the blocker resolves.
+ * Now: blocked tickets sit in Backlog without `ready:po` until the
+ * blocker closes. PO refines once with current docs. Cycle delay is
+ * one PO turn (~60s, ~$0.20-0.50) per dependency relationship — bounded
+ * and deterministic.
+ *
+ * Auto-advance from Backlog → In Architecture also respects open
+ * blockers (see `decideAutoAdvance`).
+ *
+ * See [[Lessons#PO refines from docs; docs lag the code; PO bypass on
+ * blockers ships stale refinements (#198/#199, 2026-05-08)]] for full
+ * rationale + the generalizable pattern (informational dependencies vs
+ * API dependencies in any pipeline).
  */
 export function shouldSkipBlockedFor(
   agentName: string,
   blockers: { number: number; state: "OPEN" | "CLOSED" }[],
 ): boolean {
-  if (agentName === "po") return false;
   return hasOpenBlockers(blockers);
 }
 
@@ -732,7 +747,8 @@ export interface DispatchCandidate<T extends DecisionItem = DecisionItem> {
  * scans items in order, accumulating eligible dispatches. Eligibility is the
  * same per-item gate the original WIP=1 loop applied — `shouldSkipDispatch`
  * (label-based: ready/needs-rework/wip/error/error:max_turns_salvaged) AND
- * `shouldSkipBlockedFor` (open-blocker-based for non-PO agents).
+ * `shouldSkipBlockedFor` (open-blocker-based, applies to all agents
+ * including PO — see that function's docstring for the docs-lag rationale).
  *
  * Concurrency model: WIP=1 *per dependency chain*, parallel across chains.
  * Two unrelated tickets (neither blocks the other) can run simultaneously.
