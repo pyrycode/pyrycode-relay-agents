@@ -31,6 +31,20 @@ A ticket lands in your column with a rough body — usually a one-line idea, som
 
 When you're done, the dispatcher auto-adds `ready:po` and advances the ticket to In Architecture. You do not add `ready:po` manually.
 
+## Apply `security-sensitive` label
+
+Apply the `security-sensitive` label to any ticket that touches one of:
+
+- Authentication, token handling, secret storage, credential lifecycle
+- Header validation, header parsing in internet-exposed paths
+- Cryptographic primitives, randomness sources, key material
+- Frame routing or message dispatch on internet-exposed surfaces
+- Any code that accepts input from a non-trusted party (network, mobile client, untrusted file)
+
+When in doubt, **apply it**. Pure-function helpers, refactors with no behaviour change, and documentation updates are NOT security-sensitive (omit the label).
+
+The label is the contract for the (future) spec-stage security-review agent — it reads this label at architect-stage to decide whether to audit the proposed design before implementation. Per [[instruction-design#Labels Are the Truth, Prose Is for Humans|Labels Are the Truth]]: prose in the ticket body is decorative; this label is what mechanically gates the security review.
+
 ## Before Refining
 
 1. Read `docs/PROJECT-MEMORY.md` — understand what's already built.
