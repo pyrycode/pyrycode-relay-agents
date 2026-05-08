@@ -197,9 +197,16 @@ export async function runReworkRouting(client: ReconcileClient): Promise<void> {
       for (const label of route.labelsToStrip) {
         try { await client.removeLabel(route.issueNumber, label); } catch {}
       }
-      // Bump the rework counter. Strip the old label first if present.
-      if (currentCount > 0) {
-        try { await client.removeLabel(route.issueNumber, `rework-count:${currentCount}`); } catch {}
+      // Bump the rework counter. Strip ALL existing rework-count:* labels
+      // first — extractReworkCount reads the max, but a buggy mutation
+      // chain could leave duplicates (rework-count:1 + rework-count:2).
+      // Stripping only the max would leave stragglers. Idempotent strip
+      // of every rework-count:* label keeps the state clean. (review #19)
+      const srcLabels = srcItem?.labels ?? [];
+      for (const label of srcLabels) {
+        if (label.startsWith("rework-count:")) {
+          try { await client.removeLabel(route.issueNumber, label); } catch {}
+        }
       }
       try { await client.addLabel(route.issueNumber, `rework-count:${currentCount + 1}`); } catch {}
       mutated = true;
