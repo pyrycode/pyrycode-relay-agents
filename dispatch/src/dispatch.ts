@@ -1,5 +1,5 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, createReadStream } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, createReadStream, statSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
@@ -74,6 +74,52 @@ async function notifyDiscord(message: string): Promise<void> {
 // Agent run logs
 const LOGS_DIR = resolve(agentsRepoRoot, "dispatch/logs");
 mkdirSync(LOGS_DIR, { recursive: true });
+
+// Each dispatch writes ~5MB to dispatch/logs/. At 50 dispatches/day → ~9GB/year
+// per project. Without rotation the dir eventually fills the disk on
+// long-running deployments. Default retention 30 days; override with
+// PYRY_LOG_RETENTION_DAYS=N (>=1; setting to 0 disables rotation).
+const LOG_RETENTION_DAYS = (() => {
+  const raw = process.env.PYRY_LOG_RETENTION_DAYS;
+  if (!raw) return 30;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 30;
+})();
+
+function rotateOldLogs(): void {
+  if (LOG_RETENTION_DAYS === 0) return;
+  const cutoffMs = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  let bytesFreed = 0;
+  let inspected = 0;
+  let entries: string[];
+  try {
+    entries = readdirSync(LOGS_DIR);
+  } catch (e: any) {
+    console.warn(`   ⚠️  Log rotation: could not read logs dir: ${e?.message ?? e}`);
+    return;
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".log")) continue;
+    inspected++;
+    const path = resolve(LOGS_DIR, name);
+    let stat;
+    try { stat = statSync(path); } catch { continue; }
+    if (stat.mtimeMs < cutoffMs) {
+      try {
+        unlinkSync(path);
+        removed++;
+        bytesFreed += stat.size;
+      } catch (e: any) {
+        console.warn(`   ⚠️  Log rotation: failed to delete ${name}: ${e?.message ?? e}`);
+      }
+    }
+  }
+  if (removed > 0) {
+    const mb = (bytesFreed / 1024 / 1024).toFixed(1);
+    console.log(`   🧹 Rotated ${removed}/${inspected} dispatch log(s) older than ${LOG_RETENTION_DAYS}d (~${mb}MB freed)`);
+  }
+}
 
 function agentLogPath(agent: string, issueNumber: number): string {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1224,6 +1270,11 @@ async function pollLoop(): Promise<void> {
 
   console.log("🔄 Starting dispatch loop...");
   console.log(`   Watching columns (finish-first): ${pollOrder.map((a) => a.column).join(", ")}`);
+
+  // Rotate dispatch logs older than PYRY_LOG_RETENTION_DAYS at startup. One
+  // pass per dispatcher process is enough at current dispatch rates (~50/day);
+  // restarts happen often enough that the log dir doesn't grow unbounded.
+  rotateOldLogs();
 
   // Bumped 30s → 60s on 2026-05-03 after the dispatcher hit GitHub's
   // GraphQL rate limit (5000 points/hour) overnight. Each cycle issues
