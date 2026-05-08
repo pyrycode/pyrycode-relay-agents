@@ -96,6 +96,10 @@ export class GitHubProjectClient {
    */
   private lastRateLimit: { remaining: number; resetAt: string; cost: number } | null = null;
 
+  // Once-per-process flag for the items(first:100) saturation warning.
+  // Prevents log spam on a saturated board (review #23).
+  private warnedItemsSaturation: boolean = false;
+
   constructor(config: ProjectConfig) {
     this.config = config;
     this.gql = graphql.defaults({
@@ -200,6 +204,19 @@ export class GitHubProjectClient {
         resetAt: result.rateLimit.resetAt,
         cost: result.rateLimit.cost,
       };
+    }
+
+    // Saturation warning: the GraphQL query caps at 100 items. At pyrycode's
+    // current board size this is fine, but a silent truncation at 100 would
+    // first present as "some tickets stop dispatching" with no log signal.
+    // Surface the cap before it bites — operator decides whether to add
+    // pagination or rebuild the query for first(>100). (review #23)
+    // Once per process — a saturated board prints one warn at startup, not
+    // every poll cycle.
+    const rawNodes: unknown[] = result.node.items.nodes ?? [];
+    if (rawNodes.length === 100 && !this.warnedItemsSaturation) {
+      this.warnedItemsSaturation = true;
+      console.warn(`   ⚠️  GraphQL items(first:100) returned exactly 100 — board may be truncated. Add pagination if the board grows past this.`);
     }
 
     const items: RawItem[] = [];
