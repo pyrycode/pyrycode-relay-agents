@@ -24,6 +24,7 @@ import {
   shouldAddReadyLabel,
   selectDispatches,
   decideBranchSetup,
+  findWorktreesForBranch,
 } from "./lib.js";
 import { runAutoAdvance, runReworkRouting } from "./reconcile.js";
 
@@ -622,10 +623,39 @@ async function dispatchToAgent(
 
     // Create worktree from the feature branch
     try {
-      // Clean up stale worktree if it exists from a previous failed run
+      // Clean up stale worktree at the SAME path (previous failed run with
+      // matching agent prefix).
       try {
         execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" });
       } catch {}
+
+      // Clean up orphan worktrees checked out at the SAME BRANCH under a
+      // different path. `git worktree add` fails with "fatal: '<branch>' is
+      // already checked out at '<other-path>'" otherwise. This happens when
+      // a previous cycle's cleanup execSync at lines ~985-991 was swallowed
+      // (permissions, lockfile contention) — the orphan blocks all future
+      // dispatches on this branch with error:<agent> until a human steps in.
+      // Prune first to drop dead refs (worktree dir was removed but git's
+      // metadata still references it), then force-remove anything still
+      // matching the branch.
+      try {
+        execSync(`git worktree prune`, { cwd: repoRoot, stdio: "pipe" });
+        const porcelain = execSync(`git worktree list --porcelain`, {
+          cwd: repoRoot, encoding: "utf-8", timeout: 15_000,
+        });
+        for (const orphanPath of findWorktreesForBranch(porcelain, branchName)) {
+          if (orphanPath === worktreeDir) continue; // already removed above
+          try {
+            execSync(`git worktree remove --force "${orphanPath}"`, { cwd: repoRoot, stdio: "pipe" });
+            console.log(`   🧹 Removed orphan worktree ${orphanPath} (branch ${branchName})`);
+          } catch (e) {
+            console.warn(`   ⚠️  Failed to remove orphan worktree ${orphanPath}: ${e}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`   ⚠️  Failed to inspect worktrees for ${branchName}: ${e}`);
+      }
+
       mkdirSync(resolve(repoRoot, `../.pyrycode-worktrees`), { recursive: true });
       execSync(`git worktree add "${worktreeDir}" ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
       console.log(`   🌳 Created worktree at ${worktreeDir}`);

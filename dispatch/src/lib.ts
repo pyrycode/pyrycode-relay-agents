@@ -831,6 +831,59 @@ export function decideBranchSetup(opts: {
   return "abort-local-ahead-of-origin";
 }
 
+// --------- Worktree introspection ---------
+
+/**
+ * Parse `git worktree list --porcelain` output and return the worktree
+ * directories (if any) currently checked out at the given branch.
+ *
+ * `git worktree add <path> <branch>` fails with "fatal: '<branch>' is already
+ * checked out at '<other-path>'" when the branch is in use elsewhere — even
+ * if `<path>` is fresh. The dispatcher's stale-worktree cleanup at the start
+ * of `dispatchToAgent` only handles the same-path case (`worktreeDir`); it
+ * misses orphan worktrees on the same branch under different paths (a prior
+ * cycle's `architect-100` left over when this cycle wants `developer-100`).
+ *
+ * Surfaced 2026-05-08 review (#5). The orphan blocks all future dispatches
+ * on the affected branch with `error:<agent>`, indefinitely, until a human
+ * runs `git worktree remove --force` by hand.
+ *
+ * Porcelain format (one record per worktree, blank-line separated):
+ *
+ *     worktree /path/to/wt
+ *     HEAD <sha>
+ *     branch refs/heads/<branch>
+ *
+ * Detached HEADs surface as `detached` (no `branch` line). Bare repos as
+ * `bare`. Either way we don't match (no branch to compare).
+ *
+ * Pure function over the porcelain string; no I/O. Tests in lib.test.ts.
+ */
+export function findWorktreesForBranch(
+  porcelainOutput: string,
+  branchName: string,
+): string[] {
+  const target = `refs/heads/${branchName}`;
+  const out: string[] = [];
+  let currentPath: string | null = null;
+  for (const rawLine of porcelainOutput.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (line === "") {
+      currentPath = null;
+      continue;
+    }
+    if (line.startsWith("worktree ")) {
+      currentPath = line.slice("worktree ".length);
+      continue;
+    }
+    if (line.startsWith("branch ") && currentPath !== null) {
+      const branchRef = line.slice("branch ".length);
+      if (branchRef === target) out.push(currentPath);
+    }
+  }
+  return out;
+}
+
 // --------- Path resolution ---------
 
 /**

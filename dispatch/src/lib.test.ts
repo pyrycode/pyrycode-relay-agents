@@ -50,6 +50,7 @@ import {
   shouldAddReadyLabel,
   selectDispatches,
   decideBranchSetup,
+  findWorktreesForBranch,
 } from "./lib.js";
 
 describe("resolveAgentsRepoRoot", () => {
@@ -1797,6 +1798,118 @@ describe("decideBranchSetup", () => {
     assert.equal(
       decideBranchSetup({ localExists: true, remoteExists: true }),
       "abort-local-ahead-of-origin",
+    );
+  });
+});
+
+describe("findWorktreesForBranch", () => {
+  // The dispatcher's stale-worktree cleanup at the start of dispatchToAgent
+  // only handles the same-PATH case (worktreeDir). When a previous cycle's
+  // cleanup execSync was swallowed (permissions, lockfile contention), the
+  // orphan worktree at a DIFFERENT path on the same branch blocks all
+  // future dispatches with `error:<agent>`. This function lets the
+  // dispatcher detect such orphans before `git worktree add` errors out.
+
+  test("empty porcelain → no matches", () => {
+    assert.deepEqual(findWorktreesForBranch("", "feature/100"), []);
+  });
+
+  test("single worktree on the branch → returned", () => {
+    const porcelain = [
+      "worktree /repo/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /repo/.pyrycode-worktrees/architect-100",
+      "HEAD def456",
+      "branch refs/heads/feature/100",
+      "",
+    ].join("\n");
+    assert.deepEqual(
+      findWorktreesForBranch(porcelain, "feature/100"),
+      ["/repo/.pyrycode-worktrees/architect-100"],
+    );
+  });
+
+  test("multiple worktrees on the same branch → all returned", () => {
+    // Should not normally happen, but we want to remove all of them if it does.
+    const porcelain = [
+      "worktree /repo/.pyrycode-worktrees/architect-100",
+      "HEAD def456",
+      "branch refs/heads/feature/100",
+      "",
+      "worktree /repo/.pyrycode-worktrees/developer-100",
+      "HEAD def456",
+      "branch refs/heads/feature/100",
+      "",
+    ].join("\n");
+    assert.deepEqual(
+      findWorktreesForBranch(porcelain, "feature/100"),
+      [
+        "/repo/.pyrycode-worktrees/architect-100",
+        "/repo/.pyrycode-worktrees/developer-100",
+      ],
+    );
+  });
+
+  test("worktree on different branch → not matched", () => {
+    const porcelain = [
+      "worktree /repo/.pyrycode-worktrees/architect-101",
+      "HEAD def456",
+      "branch refs/heads/feature/101",
+      "",
+    ].join("\n");
+    assert.deepEqual(findWorktreesForBranch(porcelain, "feature/100"), []);
+  });
+
+  test("detached HEAD worktree → not matched (no branch)", () => {
+    const porcelain = [
+      "worktree /repo/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /repo/.pyrycode-worktrees/wip",
+      "HEAD def456",
+      "detached",
+      "",
+    ].join("\n");
+    assert.deepEqual(findWorktreesForBranch(porcelain, "feature/100"), []);
+  });
+
+  test("bare repo entry → not matched (no branch)", () => {
+    const porcelain = [
+      "worktree /repo/bare",
+      "HEAD abc123",
+      "bare",
+      "",
+    ].join("\n");
+    assert.deepEqual(findWorktreesForBranch(porcelain, "feature/100"), []);
+  });
+
+  test("similar branch names don't false-match", () => {
+    // refs/heads/feature/100 vs refs/heads/feature/1000 — must not collide.
+    const porcelain = [
+      "worktree /repo/.pyrycode-worktrees/architect-1000",
+      "HEAD def456",
+      "branch refs/heads/feature/1000",
+      "",
+    ].join("\n");
+    assert.deepEqual(findWorktreesForBranch(porcelain, "feature/100"), []);
+  });
+
+  test("trailing whitespace on porcelain lines doesn't break parsing", () => {
+    // git's porcelain output is well-formed, but we strip trailing whitespace
+    // defensively so a future format quirk (CRLF, padding) doesn't silently
+    // hide an orphan and re-introduce the bug.
+    const porcelain = [
+      "worktree /repo/.pyrycode-worktrees/architect-100  ",
+      "HEAD def456",
+      "branch refs/heads/feature/100  ",
+      "",
+    ].join("\n");
+    assert.deepEqual(
+      findWorktreesForBranch(porcelain, "feature/100"),
+      ["/repo/.pyrycode-worktrees/architect-100"],
     );
   });
 });
