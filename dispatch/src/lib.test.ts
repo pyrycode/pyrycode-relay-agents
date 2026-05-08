@@ -29,6 +29,7 @@ import {
   resolvePyrycodeRepoRoot,
   isPipelineLabel,
   isPipelineLabelForAgent,
+  decidePostRunLabels,
   scrubSpawnEnv,
   SPAWN_ENV_DENYLIST,
   shouldSkipDispatch,
@@ -1841,6 +1842,100 @@ describe("decideBranchSetup", () => {
       decideBranchSetup({ localExists: true, remoteExists: true }),
       "abort-local-ahead-of-origin",
     );
+  });
+});
+
+describe("decidePostRunLabels", () => {
+  // The post-run label decision is the single biggest pure-logic surface
+  // that previously sat inline in dispatchToAgent (review #16). Tests here
+  // pin the rules; the dispatch.ts caller applies the side effects.
+
+  test("clean run, current column matches agent column → addReadyLabel=true", () => {
+    const d = decidePostRunLabels({
+      postLabels: [],
+      agentName: "developer",
+      agentColumn: "In Development",
+      currentColumn: "In Development",
+    });
+    assert.equal(d.reworkTarget, null);
+    assert.equal(d.addReadyLabel, true);
+    assert.equal(d.logKind, "ready");
+    assert.equal(d.shouldStripLegacyNeedsRework, false);
+  });
+
+  test("needs-rework:<target> present → reworkTarget set, no ready label", () => {
+    const d = decidePostRunLabels({
+      postLabels: ["needs-rework:architect"],
+      agentName: "developer",
+      agentColumn: "In Development",
+      currentColumn: "In Development",
+    });
+    assert.equal(d.reworkTarget, "architect");
+    assert.equal(d.addReadyLabel, false);
+    assert.equal(d.logKind, "rework");
+  });
+
+  test("agent moved ticket out of column → moved-out, no ready label", () => {
+    // PO demotes Backlog → Inbox: the column move IS the completion signal.
+    const d = decidePostRunLabels({
+      postLabels: [],
+      agentName: "po",
+      agentColumn: "Backlog",
+      currentColumn: "Inbox",
+    });
+    assert.equal(d.addReadyLabel, false);
+    assert.equal(d.logKind, "moved-out");
+  });
+
+  test("post-run status fetch failed (currentColumn=null) → status-unknown, no ready label", () => {
+    // Cautious — preserves the next cycle's chance to recover.
+    const d = decidePostRunLabels({
+      postLabels: [],
+      agentName: "developer",
+      agentColumn: "In Development",
+      currentColumn: null,
+    });
+    assert.equal(d.addReadyLabel, false);
+    assert.equal(d.logKind, "status-unknown");
+  });
+
+  test("legacy `needs-rework` (no suffix) → strip flag set, target falls back to agent", () => {
+    // Pre-prefix-scheme semantics: `needs-rework` alone means "this agent
+    // needs to redo its work."
+    const d = decidePostRunLabels({
+      postLabels: ["needs-rework"],
+      agentName: "developer",
+      agentColumn: "In Development",
+      currentColumn: "In Development",
+    });
+    assert.equal(d.reworkTarget, "developer");
+    assert.equal(d.shouldStripLegacyNeedsRework, true);
+    assert.equal(d.addReadyLabel, false);
+    assert.equal(d.logKind, "rework");
+  });
+
+  test("explicit needs-rework:<target> wins over legacy `needs-rework`", () => {
+    const d = decidePostRunLabels({
+      postLabels: ["needs-rework:po", "needs-rework"],
+      agentName: "developer",
+      agentColumn: "In Development",
+      currentColumn: "In Development",
+    });
+    assert.equal(d.reworkTarget, "po");
+    assert.equal(d.shouldStripLegacyNeedsRework, true); // legacy still gets stripped
+    assert.equal(d.addReadyLabel, false);
+    assert.equal(d.logKind, "rework");
+  });
+
+  test("no rework target, currentColumn === agentColumn → ready (the happy path)", () => {
+    const d = decidePostRunLabels({
+      postLabels: ["size:m", "priority:p2"],  // non-pipeline labels are noise
+      agentName: "code-review",
+      agentColumn: "In Code Review",
+      currentColumn: "In Code Review",
+    });
+    assert.equal(d.addReadyLabel, true);
+    assert.equal(d.logKind, "ready");
   });
 });
 

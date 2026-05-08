@@ -23,6 +23,7 @@ import {
   findReadyPrNumber,
   extractRateLimitInfo,
   shouldAddReadyLabel,
+  decidePostRunLabels,
   selectDispatches,
   decideBranchSetup,
   findWorktreesForBranch,
@@ -1051,30 +1052,15 @@ async function dispatchToAgent(
     // and posted its own comment; adding `ready:<agent>` here would auto-advance
     // partial work, which is exactly what the salvage path is designed to prevent.
     if (item.issueNumber > 0 && !saferSalvaged) {
-      let reworkTarget: string | null = null;
+      // Gather state — labels + post-run column. Both can fail with API
+      // errors; collect what we have and let `decidePostRunLabels` choose
+      // the cautious branch when state is missing.
+      let postLabels: string[] = [];
       try {
-        const postLabels = await client.getIssueLabels(item.issueNumber);
-        const reworkLabel = postLabels.find(l => l.startsWith("needs-rework:"));
-        if (reworkLabel) {
-          reworkTarget = reworkLabel.replace("needs-rework:", "");
-        }
-        // Handle legacy generic "needs-rework" label
-        if (postLabels.includes("needs-rework")) {
-          try { await client.removeLabel(item.issueNumber, "needs-rework"); } catch {}
-          if (!reworkTarget) reworkTarget = agent.name;
-        }
+        postLabels = await client.getIssueLabels(item.issueNumber);
       } catch (e) {
         console.warn(`   ⚠️  Failed to check post-run labels: ${e}`);
       }
-
-      // Decide whether to add `ready:<agent>` based on:
-      //   - rework target presence (existing semantics)
-      //   - whether the agent moved the ticket out of its dispatch
-      //     column (e.g. PO demoting to Inbox, PO moving split parent
-      //     to Done). In those cases the column move IS the agent's
-      //     completion signal; adding `ready:<agent>` would attach a
-      //     misleading "ready" label to a ticket already routed away.
-      //   See `shouldAddReadyLabel` in lib.ts for the full rationale.
       let currentColumn: string | null = null;
       try {
         currentColumn = await client.getItemStatus(item.issueNumber, { forceRefresh: true });
@@ -1082,26 +1068,45 @@ async function dispatchToAgent(
         console.warn(`   ⚠️  Failed to fetch post-run status for #${item.issueNumber}: ${e}`);
       }
 
-      if (shouldAddReadyLabel({ agentColumn: agent.column, currentColumn, hasReworkTarget: reworkTarget !== null })) {
+      // Pure decision in lib.ts — caller below applies the side effects.
+      // See decidePostRunLabels for the routing rules; tests in lib.test.ts.
+      const decision = decidePostRunLabels({
+        postLabels,
+        agentName: agent.name,
+        agentColumn: agent.column,
+        currentColumn,
+      });
+
+      if (decision.shouldStripLegacyNeedsRework) {
+        try { await client.removeLabel(item.issueNumber, "needs-rework"); } catch {}
+      }
+
+      if (decision.addReadyLabel) {
         try {
           await client.addLabel(item.issueNumber, `ready:${agent.name}`);
           console.log(`   🏷️  Added ready:${agent.name} to #${item.issueNumber}`);
         } catch (e) {
           console.warn(`   ⚠️  Failed to add ready:${agent.name} label: ${e}`);
         }
-      } else if (reworkTarget) {
-        console.log(`   🔄 Rework requested → needs-rework:${reworkTarget}`);
-      } else if (currentColumn !== null && currentColumn !== agent.column) {
-        console.log(`   📋 Agent moved #${item.issueNumber} ${agent.column} → ${currentColumn} — skipping ready:${agent.name}`);
       } else {
-        console.log(`   ⚠️  Skipping ready:${agent.name} for #${item.issueNumber} (status fetch failed; will retry next cycle)`);
+        switch (decision.logKind) {
+          case "rework":
+            console.log(`   🔄 Rework requested → needs-rework:${decision.reworkTarget}`);
+            break;
+          case "moved-out":
+            console.log(`   📋 Agent moved #${item.issueNumber} ${agent.column} → ${currentColumn} — skipping ready:${agent.name}`);
+            break;
+          case "status-unknown":
+            console.log(`   ⚠️  Skipping ready:${agent.name} for #${item.issueNumber} (status fetch failed; will retry next cycle)`);
+            break;
+        }
       }
 
       try {
         await client.addComment(
           item.issueNumber,
-          reworkTarget
-            ? `## 🤖 ${agent.description}\n\n${agent.name} agent flagged issues on this ticket → rework by **${reworkTarget}**.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Needs rework by ${reworkTarget}.** See agent findings above.`
+          decision.reworkTarget
+            ? `## 🤖 ${agent.description}\n\n${agent.name} agent flagged issues on this ticket → rework by **${decision.reworkTarget}**.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Needs rework by ${decision.reworkTarget}.** See agent findings above.`
             : `## 🤖 ${agent.description}\n\n${agent.name} agent has completed work on this ticket.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Ready for human review.** Move to the next column when approved.`
         );
       } catch (e) {

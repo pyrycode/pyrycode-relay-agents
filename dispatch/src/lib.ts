@@ -631,6 +631,97 @@ export function extractRateLimitInfo(err: unknown): {
   return { isRateLimited: true, resetUnixSeconds };
 }
 
+// --------- Post-run label decision (pure layer for #16 extraction) ---------
+
+/**
+ * The decision shape returned by `decidePostRunLabels`. The caller
+ * applies the side effects (label add, label strip, log line, comment
+ * framing) based on these flags.
+ */
+export interface PostRunLabelDecision {
+  /** The agent named in any `needs-rework:<target>` label, or null. */
+  reworkTarget: string | null;
+  /** True if a legacy `needs-rework` (no agent suffix) is present and
+   *  should be stripped — the dispatcher's legacy-label cleanup. */
+  shouldStripLegacyNeedsRework: boolean;
+  /** True if the dispatcher should add `ready:<agentName>`. False if
+   *  rework was requested, the agent moved the ticket out of its
+   *  column, or the post-run status fetch failed. */
+  addReadyLabel: boolean;
+  /** Why `addReadyLabel` is what it is — drives the log message
+   *  shape so humans can see the reasoning at a glance. */
+  logKind: "ready" | "rework" | "moved-out" | "status-unknown";
+}
+
+/**
+ * Decide post-run labeling for an agent dispatch given the labels
+ * present after the run, the agent's column, and the post-run column.
+ *
+ * Replaces the inline label-routing block in `dispatchToAgent` (review
+ * #16). Three responsibilities, all pure:
+ *
+ * 1. Find the rework target — the agent named in any `needs-rework:<target>`
+ *    label. Also flags whether a legacy `needs-rework` (no suffix) is
+ *    present so the caller can strip it.
+ * 2. Decide whether to add `ready:<agentName>` — defers to
+ *    `shouldAddReadyLabel` for the canonical rule (rework wins, column
+ *    move wins, status-unknown wins).
+ * 3. Categorize the outcome for logging — `ready`, `rework`, `moved-out`,
+ *    or `status-unknown`.
+ *
+ * `currentColumn === null` means the post-run status fetch failed; the
+ * caller logs the status-unknown case and skips the ready label
+ * (cautious — preserves the next cycle's chance to recover).
+ */
+export function decidePostRunLabels(opts: {
+  postLabels: readonly string[];
+  agentName: string;
+  agentColumn: string;
+  currentColumn: string | null;
+}): PostRunLabelDecision {
+  // Find a needs-rework:<target> label (first match wins; multiple
+  // shouldn't co-exist but if they do, the first one is canonical).
+  let reworkTarget: string | null = null;
+  for (const label of opts.postLabels) {
+    const target = extractReworkTarget(label);
+    if (target !== null) {
+      reworkTarget = target;
+      break;
+    }
+  }
+
+  const hasLegacy = opts.postLabels.includes("needs-rework");
+  // Legacy `needs-rework` (no suffix) is interpreted as "this agent's work
+  // needs rework by this same agent" — the dispatcher's pre-prefix-scheme
+  // semantics. Promotes it into a structured target only if no explicit
+  // one was found.
+  const effectiveReworkTarget = reworkTarget ?? (hasLegacy ? opts.agentName : null);
+
+  const addReadyLabel = shouldAddReadyLabel({
+    agentColumn: opts.agentColumn,
+    currentColumn: opts.currentColumn,
+    hasReworkTarget: effectiveReworkTarget !== null,
+  });
+
+  let logKind: PostRunLabelDecision["logKind"];
+  if (addReadyLabel) {
+    logKind = "ready";
+  } else if (effectiveReworkTarget !== null) {
+    logKind = "rework";
+  } else if (opts.currentColumn !== null && opts.currentColumn !== opts.agentColumn) {
+    logKind = "moved-out";
+  } else {
+    logKind = "status-unknown";
+  }
+
+  return {
+    reworkTarget: effectiveReworkTarget,
+    shouldStripLegacyNeedsRework: hasLegacy,
+    addReadyLabel,
+    logKind,
+  };
+}
+
 /**
  * Decide whether to add `ready:<agent>` after a successful agent run.
  *
