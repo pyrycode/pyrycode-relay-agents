@@ -45,6 +45,7 @@ import {
   shouldProduceCommits,
   parseCommitsAhead,
   shouldFlagEmptyBranch,
+  decideCodegraphSymlink,
   hasOpenBlockers,
   shouldSkipBlockedFor,
   extractReworkCount,
@@ -2449,6 +2450,55 @@ describe("shouldFlagEmptyBranch", () => {
     // skips the flag rather than acting on a value it doesn't trust.
     const arch = AGENTS.find(a => a.name === "architect")!;
     assert.equal(shouldFlagEmptyBranch(arch, -1), false);
+  });
+});
+
+describe("decideCodegraphSymlink", () => {
+  // Worktrees don't share `.codegraph/` with the canonical repo (it's
+  // gitignored, lives outside `.git/`, and `git worktree add` doesn't
+  // copy untracked dirs). Without a symlink, agents spawned in the
+  // worktree see an empty index and silently fall through to grep.
+  // Soft-fail on missing source — warn the operator but proceed; agents
+  // can still run, they just lose codegraph's value for that ticket.
+
+  test("source index exists, no destination yet → symlink (ready)", () => {
+    assert.deepEqual(
+      decideCodegraphSymlink({ sourceExists: true, destExists: false }),
+      { action: "symlink", reason: "ready" },
+    );
+  });
+
+  test("source exists AND destination exists → skip (already-present)", () => {
+    // Idempotency: a re-prep of an existing worktree shouldn't churn the
+    // symlink. Existing dst could be the previous run's symlink or a
+    // real dir an operator dropped in; either way, leave it alone.
+    assert.deepEqual(
+      decideCodegraphSymlink({ sourceExists: true, destExists: true }),
+      { action: "skip", reason: "already-present" },
+    );
+  });
+
+  test("source missing → skip (no-source) — caller warns operator", () => {
+    // Index hasn't been bootstrapped in the canonical repo. The
+    // dispatcher should warn (so the operator runs `codegraph init -i`)
+    // but proceed — agents fall through to grep, which is what they
+    // did before codegraph existed.
+    assert.deepEqual(
+      decideCodegraphSymlink({ sourceExists: false, destExists: false }),
+      { action: "skip", reason: "no-source" },
+    );
+  });
+
+  test("source missing but destination present → skip (already-present, don't warn)", () => {
+    // Edge case: previous run linked successfully, then someone moved
+    // the canonical index away. Leave the dst alone (it's a stale
+    // symlink, but cleaning it up isn't this function's job) and
+    // don't warn (the present dst hides the staleness from the agent
+    // — that's a separate problem class).
+    assert.deepEqual(
+      decideCodegraphSymlink({ sourceExists: false, destExists: true }),
+      { action: "skip", reason: "already-present" },
+    );
   });
 });
 

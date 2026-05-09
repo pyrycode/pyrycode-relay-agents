@@ -907,6 +907,64 @@ export function shouldFlagEmptyBranch(agent: AgentConfig, commitsAhead: number):
   return commitsAhead === 0;
 }
 
+// --------- Codegraph worktree integration ---------
+
+/**
+ * The decision shape returned by `decideCodegraphSymlink`. The caller
+ * applies the side effect (symlinkSync) and the log line based on the
+ * `action` and `reason`.
+ *
+ * - `symlink` + `ready`: caller should `symlinkSync(source, dest)`
+ * - `skip` + `already-present`: dst exists; do nothing, don't warn
+ * - `skip` + `no-source`: source index missing; warn so operator
+ *   bootstraps via `codegraph init -i` in the canonical repo
+ */
+export interface CodegraphSymlinkDecision {
+  action: "symlink" | "skip";
+  reason: "ready" | "already-present" | "no-source";
+}
+
+/**
+ * Decide whether to symlink the canonical repo's `.codegraph/` index
+ * into a freshly created worktree.
+ *
+ * **Why a symlink at all:** the dispatcher creates a worktree per
+ * dispatched ticket (`pyrycode/.pyrycode-worktrees/<agent>-<n>/`).
+ * Each worktree is a fresh checkout — `git worktree add` does not
+ * carry untracked files into the new tree, and `.codegraph/` is
+ * gitignored. An agent spawned in the worktree with codegraph in its
+ * `allowedTools` would launch the codegraph MCP server with cwd =
+ * worktree dir, find no `.codegraph/`, and return empty results for
+ * every query. The agent then silently falls back to grep, paying
+ * for the codegraph tool surface in tokens without getting any of
+ * the value.
+ *
+ * **Soft-fail on no-source:** if the canonical repo hasn't been
+ * indexed yet, we don't fail the dispatch. Agents still run; they
+ * just lose codegraph for that ticket. The warning surfaces the
+ * setup gap so the operator knows to run `codegraph init -i`.
+ *
+ * **Idempotent:** if the destination already exists (previous run
+ * left a symlink, or an operator dropped a real dir there), leave
+ * it alone. Re-creating would either be a no-op or destroy
+ * intentional state.
+ *
+ * Pure decision; the caller (in dispatch.ts) does the `existsSync`
+ * checks, the `symlinkSync` call, and the log/warn output.
+ */
+export function decideCodegraphSymlink(opts: {
+  sourceExists: boolean;
+  destExists: boolean;
+}): CodegraphSymlinkDecision {
+  if (opts.destExists) {
+    return { action: "skip", reason: "already-present" };
+  }
+  if (!opts.sourceExists) {
+    return { action: "skip", reason: "no-source" };
+  }
+  return { action: "symlink", reason: "ready" };
+}
+
 // Built from AGENTS — single source of truth for the name → column mapping.
 export const AGENT_COLUMN_MAP: ReadonlyMap<string, string> = new Map(
   AGENTS.map((a: AgentConfig) => [a.name, a.column]),

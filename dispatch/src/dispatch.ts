@@ -1,5 +1,5 @@
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, createReadStream, statSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, readdirSync, createReadStream, statSync, symlinkSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
@@ -19,6 +19,7 @@ import {
   shouldProduceCommits,
   parseCommitsAhead,
   shouldFlagEmptyBranch,
+  decideCodegraphSymlink,
   hasOpenBlockers,
   shouldSkipBlockedFor,
   maxTurnsFor,
@@ -805,6 +806,34 @@ async function dispatchToAgent(
       mkdirSync(resolve(repoRoot, `../.pyrycode-worktrees`), { recursive: true });
       execSync(`git worktree add "${worktreeDir}" ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
       console.log(`   🌳 Created worktree at ${worktreeDir}`);
+
+      // Symlink the canonical repo's codegraph index into the worktree.
+      // `.codegraph/` is gitignored and lives outside `.git/`, so
+      // `git worktree add` won't bring it across — without this link,
+      // agents that try `mcp__codegraph__*` tools find an empty index
+      // (the codegraph MCP server reads from CWD = worktree dir),
+      // silently fall through to grep, and pay tokens for the codegraph
+      // tool surface without getting any of its value. See
+      // `decideCodegraphSymlink` in lib.ts for the decision rules.
+      const codegraphSrc = resolve(repoRoot, ".codegraph");
+      const codegraphDst = resolve(worktreeDir, ".codegraph");
+      const cgDecision = decideCodegraphSymlink({
+        sourceExists: existsSync(codegraphSrc),
+        destExists: existsSync(codegraphDst),
+      });
+      if (cgDecision.action === "symlink") {
+        try {
+          symlinkSync(codegraphSrc, codegraphDst);
+          console.log(`   🔗 Linked .codegraph/ from canonical repo`);
+        } catch (e) {
+          // Soft-fail: don't abort dispatch over a broken symlink.
+          // Agent runs without codegraph this cycle; operator sees the
+          // warning and can investigate (permission issue, races, etc).
+          console.warn(`   ⚠️  Failed to symlink .codegraph/ into worktree: ${e}`);
+        }
+      } else if (cgDecision.reason === "no-source") {
+        console.warn(`   ⚠️  Canonical .codegraph/ index missing at ${codegraphSrc} — agents in this worktree will fall through to grep when they call codegraph_*. Run \`codegraph init -i\` in the repo root to bootstrap.`);
+      }
     } catch (e) {
       console.error(`   ❌ Failed to create worktree: ${e}`);
       await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to create git worktree.\n\n\`\`\`\n${e}\n\`\`\``);
