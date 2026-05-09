@@ -626,6 +626,15 @@ export interface DispatchClient {
   addComment(issueNumber: number, body: string): Promise<void>;
   getIssueLabels(issueNumber: number): Promise<string[]>;
   getItemStatus(issueNumber: number, options?: { forceRefresh?: boolean }): Promise<string | null>;
+  /** Used by `runAutoMerge` and `runDoneCleanup` to find Done-column
+   *  items. The real `GitHubProjectClient` reads from the per-cycle
+   *  cache; tests just back this with an in-memory map. */
+  getItemsByStatus(status: string): Promise<ProjectItem[]>;
+  /** Used by `runClosedSweep` to find closed issues that are stranded
+   *  outside the Done column. */
+  getClosedItemsNotInDone(): Promise<ProjectItem[]>;
+  /** Used by `runClosedSweep` to move closed-but-stranded items to Done. */
+  updateItemStatus(itemId: string, newStatus: string): Promise<void>;
 }
 
 // IO surface every phase function depends on. Threading it through
@@ -1558,7 +1567,7 @@ function warnOnceCleanup(issueNumber: number, label: string, kind: string, e: un
   console.warn(`   ⚠️  ${kind} failed for #${issueNumber} label="${label}" (further occurrences silenced this session): ${(e as any)?.message ?? e}`);
 }
 
-async function runClosedSweep(client: GitHubProjectClient): Promise<void> {
+export async function runClosedSweep(client: DispatchClient): Promise<void> {
   try {
     const closed = await client.getClosedItemsNotInDone();
     for (const item of closed) {
@@ -1591,7 +1600,7 @@ async function runClosedSweep(client: GitHubProjectClient): Promise<void> {
 // closed-as-won't-fix all reach Done with their pipeline labels intact.
 // This pass closes the gap. See `decideDoneCleanup` in lib.ts.
 
-async function runDoneCleanup(client: GitHubProjectClient): Promise<void> {
+export async function runDoneCleanup(client: DispatchClient): Promise<void> {
   let doneItems: ProjectItem[];
   try {
     doneItems = await client.getItemsByStatus("Done");
@@ -1619,6 +1628,218 @@ async function runDoneCleanup(client: GitHubProjectClient): Promise<void> {
       }
     }
     console.log(`   🧹 Done-cleanup: stripped ${cleanup.labelsToStrip.length} pipeline label(s) from #${cleanup.issueNumber}`);
+  }
+}
+
+// =====================================================================
+// pollLoop coordination helpers (extracted for testability)
+// =====================================================================
+
+/**
+ * Pre-dispatch label prep: for each candidate, strip any stale
+ * pipeline labels SCOPED TO THIS AGENT (not other agents — see
+ * #9 review lesson 2026-05-08), strip the legacy
+ * `ready-for-review` / `needs-rework` labels, and apply
+ * `wip:<agent>` so the dispatcher's downstream `shouldSkipDispatch`
+ * gate sees the in-flight signal.
+ *
+ * Sequential by design — fast (~5 ops per candidate, mostly cache
+ * reads after the first invalidation) and ordered so a slow child
+ * can't race with another candidate's prep on the same item.
+ *
+ * `isPipelineLabelForAgent` scoping was added 2026-05-08 (#9 review):
+ * a previous version stripped ALL pipeline labels (including
+ * `error:OTHER_AGENT`), silently erasing the human-actionable failure
+ * signal from a prior run on a different agent. Other agents' labels
+ * aren't this dispatch's concern.
+ */
+export async function runPreDispatchPrep(
+  candidates: ReadonlyArray<{ agent: AgentConfig; item: ProjectItem }>,
+  client: DispatchClient,
+): Promise<void> {
+  for (const { agent, item } of candidates) {
+    const wipLabel = `wip:${agent.name}`;
+    for (const label of item.labels) {
+      if (isPipelineLabelForAgent(label, agent.name)) {
+        try {
+          await client.removeLabel(item.issueNumber, label);
+          console.log(`   🏷️  Removed stale ${label} from #${item.issueNumber}`);
+        } catch {}
+      }
+    }
+    for (const legacy of ["ready-for-review", "needs-rework"]) {
+      if (item.labels.includes(legacy)) {
+        try {
+          await client.removeLabel(item.issueNumber, legacy);
+          console.log(`   🏷️  Removed legacy ${legacy} from #${item.issueNumber}`);
+        } catch {}
+      }
+    }
+    try {
+      await client.addLabel(item.issueNumber, wipLabel);
+      console.log(`   🏷️  Added ${wipLabel} to #${item.issueNumber}`);
+    } catch {}
+  }
+}
+
+/**
+ * Concurrent dispatch driver. Runs `dispatchToAgent` for every
+ * candidate in parallel via `Promise.allSettled` so one dispatch's
+ * failure doesn't abort the others. Each dispatch's `wip:<agent>`
+ * removal lives in a `finally` block so a thrown error doesn't
+ * leave a stranded wip on the ticket.
+ *
+ * `Promise.allSettled` is the load-bearing isolation primitive:
+ * `Promise.all` would short-circuit on the first rejection, killing
+ * any in-flight dispatches. Settled-form lets each dispatch run to
+ * completion regardless of its siblings' fates.
+ *
+ * Returns the settled results so the caller can introspect (none of
+ * production does today — `pollLoop` discards them — but tests assert
+ * on per-promise status to verify isolation).
+ */
+export async function runConcurrentDispatches(
+  candidates: ReadonlyArray<{ agent: AgentConfig; item: ProjectItem }>,
+  client: DispatchClient,
+  deps: DispatchDeps = DEFAULT_DEPS,
+): Promise<PromiseSettledResult<void>[]> {
+  return Promise.allSettled(candidates.map(({ agent, item }) =>
+    (async () => {
+      const wipLabel = `wip:${agent.name}`;
+      try {
+        await dispatchToAgent(agent, item, client, deps);
+      } catch (error: any) {
+        console.error(`Error dispatching ${agent.name} on #${item.issueNumber}: ${error.message}`);
+      } finally {
+        try { await client.removeLabel(item.issueNumber, wipLabel); } catch {}
+      }
+    })()
+  ));
+}
+
+/**
+ * Auto-merge any open PR for tickets sitting in the Done column.
+ *
+ * Steps per Done-column ticket:
+ *   - Skip if `merged` already set (no open PR), `error:merge-conflict`
+ *     set (human triaging), or issueNumber <= 0 (synthetic items).
+ *   - `gh pr list --head feature/<n>` to find the PR. Transient
+ *     failure (network/rate-limit) → skip, retry next cycle.
+ *   - `gh pr merge <n> --merge --delete-branch`. On success: pull
+ *     merged changes to local main (non-fatal failure), strip pipeline
+ *     labels from the issue, Discord notify. On conflict (detected
+ *     via `isMergeConflictError` on stderr): apply
+ *     `error:merge-conflict` (a global-block label that stops retry),
+ *     post a triage comment with the manual-resolution recipe, Discord
+ *     notify. Non-conflict failures: silent, retry next cycle.
+ *
+ * The conflict-block-via-label pattern is the 2026-05-08 fix that
+ * stopped infinite retry loops on stale-PR conflicts (see Lessons.md
+ * "Auto-merge fails silently on stale-PR conflicts").
+ */
+export async function runAutoMerge(
+  client: DispatchClient,
+  deps: DispatchDeps = DEFAULT_DEPS,
+): Promise<void> {
+  const { execSync, notifyDiscord } = deps;
+  try {
+    const doneItems = await client.getItemsByStatus("Done");
+    for (const item of doneItems) {
+      // Skip epics and items without issue numbers
+      if (item.issueNumber <= 0) continue;
+      // Skip if already merged (no open PR)
+      if (item.labels.includes("merged")) continue;
+      // Skip if already in conflict-block state — human is triaging.
+      // Without this, the auto-merge would loop on the same gh pr merge
+      // failure every cycle indefinitely (the pre-2026-05-08 bug). The
+      // label is stripped manually after `git merge origin/main` +
+      // resolution + push lands the conflict-resolved branch.
+      if (item.labels.includes("error:merge-conflict")) continue;
+
+      // Step 1: Look up the open PR. Side-effects ahead, so a separate
+      // try-catch — if the lookup itself fails (network / auth), skip
+      // silently and retry next cycle.
+      let prNumber: number;
+      try {
+        const prCheck = execSync(
+          `gh pr list --head "feature/${item.issueNumber}" --state open --json number --jq '.[0].number'`,
+          { cwd: repoRoot, encoding: "utf-8", timeout: 15_000 }
+        ).toString().trim();
+        if (!prCheck) continue;
+        const parsed = parseInt(prCheck, 10);
+        if (isNaN(parsed)) continue;
+        prNumber = parsed;
+      } catch (e: any) {
+        // PR-list failures are transient (rate limit, network) — retry next cycle.
+        continue;
+      }
+
+      // Step 2: Try the actual merge. Conflict path is the special case.
+      try {
+        console.log(`   🔀 Auto-merging PR #${prNumber} for #${item.issueNumber} (moved to Done)`);
+        execSync(
+          `gh pr merge ${prNumber} --merge --delete-branch`,
+          { cwd: repoRoot, encoding: "utf-8", timeout: 30_000 }
+        );
+        // Pull merged changes to local main. Failure is non-fatal — the
+        // PR already merged on origin, so the next cycle's dispatch will
+        // re-pull and recover. But silent swallowing leaves stale local
+        // main propagating through subsequent cycles' dispatch setup
+        // where the same `try {}` would swallow it again. Surface so
+        // operators see it in dispatcher logs.
+        try {
+          execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe", timeout: 15_000 });
+        } catch (e: any) {
+          console.warn(`   ⚠️  Post-merge git pull failed (will retry next cycle): ${e?.message ?? e}`);
+        }
+
+        // Clean up pipeline labels — they're noise on completed tickets.
+        for (const label of item.labels) {
+          if (isPipelineLabel(label)) {
+            try { await client.removeLabel(item.issueNumber, label); } catch {}
+          }
+        }
+
+        console.log(`   ✅ PR #${prNumber} merged, branch feature/${item.issueNumber} deleted, labels cleaned`);
+        await notifyDiscord(`🔀 PR #${prNumber} merged for #${item.issueNumber}: ${item.title}`);
+      } catch (e: any) {
+        // Combine stderr + message — execSync surfaces gh's stderr
+        // through both depending on Node version + how the process exited.
+        const errOut = `${e.stderr ?? ""}\n${e.message ?? ""}`;
+        if (isMergeConflictError(errOut)) {
+          // Label + comment, then bail out of retries via GLOBAL_BLOCK_LABELS.
+          // Idempotent guard above (`error:merge-conflict` skip) handles
+          // re-entry — but we got here, so the label isn't set yet.
+          console.warn(`   🛑 PR #${prNumber} for #${item.issueNumber} has merge conflicts — labelling for triage`);
+          try {
+            await client.addLabel(item.issueNumber, "error:merge-conflict");
+            await client.addComment(
+              item.issueNumber,
+              `## 🛑 Auto-merge blocked by merge conflict\n\n` +
+              `PR #${prNumber} cannot be merged into \`main\` cleanly. ` +
+              `The dispatcher has stopped retrying this PR; resolve the conflict manually:\n\n` +
+              `\`\`\`bash\n` +
+              `gh pr checkout ${prNumber}\n` +
+              `git fetch origin main\n` +
+              `git merge origin/main\n` +
+              `# resolve conflicts in your editor\n` +
+              `git push\n` +
+              `\`\`\`\n\n` +
+              `Then strip \`error:merge-conflict\` from this issue to resume the pipeline. ` +
+              `The dispatcher will pick the merge back up on its next cycle.\n\n` +
+              `*Filed automatically by dispatcher — pyrycode/agents commit log has the implementation.*`,
+            );
+            await notifyDiscord(`🛑 Merge conflict on PR #${prNumber} (#${item.issueNumber}) — labelled for human triage.`);
+          } catch (labelErr: any) {
+            console.warn(`   ⚠️  Failed to label/comment merge conflict on #${item.issueNumber}: ${labelErr.message ?? labelErr}`);
+          }
+          continue;
+        }
+        // Non-conflict failure (transient network, auth, etc.): silently retry next cycle.
+      }
+    }
+  } catch (error: any) {
+    console.error(`Error polling Done column: ${error.message}`);
   }
 }
 
@@ -1771,57 +1992,11 @@ export async function pollLoop(): Promise<void> {
       console.log(`   🚦 Dispatching ${candidates.length} agent(s) this cycle (cap ${MAX_CONCURRENT}): ${candidates.map(c => `${c.agent.name}#${c.item.issueNumber}`).join(", ")}`);
     }
 
-    // Pre-dispatch mutations (sequential — fast, ~5 ops per candidate, mostly
-    // cache reads after the first invalidation): strip stale pipeline labels
-    // FOR THIS AGENT ONLY, then add wip:<agent>. Done before any
-    // dispatchToAgent fires so a slow child can't race with another
-    // candidate's prep on the same item.
-    //
-    // Scoped to the dispatching agent's labels (`isPipelineLabelForAgent`)
-    // — a previous version stripped ALL pipeline labels (including
-    // `error:OTHER_AGENT`), silently erasing the human-actionable failure
-    // signal from a prior run on a different agent. Other agents' labels
-    // aren't this dispatch's concern. See review #9.
-    for (const { agent, item } of candidates) {
-      const wipLabel = `wip:${agent.name}`;
-      for (const label of item.labels) {
-        if (isPipelineLabelForAgent(label, agent.name)) {
-          try {
-            await client.removeLabel(item.issueNumber, label);
-            console.log(`   🏷️  Removed stale ${label} from #${item.issueNumber}`);
-          } catch {}
-        }
-      }
-      for (const legacy of ["ready-for-review", "needs-rework"]) {
-        if (item.labels.includes(legacy)) {
-          try {
-            await client.removeLabel(item.issueNumber, legacy);
-            console.log(`   🏷️  Removed legacy ${legacy} from #${item.issueNumber}`);
-          } catch {}
-        }
-      }
-      try {
-        await client.addLabel(item.issueNumber, wipLabel);
-        console.log(`   🏷️  Added ${wipLabel} to #${item.issueNumber}`);
-      } catch {}
-    }
-
-    // Concurrent dispatch. Each candidate runs to completion independently;
-    // wip:<agent> removal is in the per-dispatch finally block so a thrown
-    // error doesn't leave a stranded wip on this ticket. Promise.allSettled
-    // means one failure doesn't abort the others.
-    await Promise.allSettled(candidates.map(({ agent, item }) =>
-      (async () => {
-        const wipLabel = `wip:${agent.name}`;
-        try {
-          await dispatchToAgent(agent, item, client);
-        } catch (error: any) {
-          console.error(`Error dispatching ${agent.name} on #${item.issueNumber}: ${error.message}`);
-        } finally {
-          try { await client.removeLabel(item.issueNumber, wipLabel); } catch {}
-        }
-      })()
-    ));
+    // Pre-dispatch mutations + concurrent dispatch — both extracted to
+    // testable helpers below pollLoop. See `runPreDispatchPrep` and
+    // `runConcurrentDispatches` for invariants.
+    await runPreDispatchPrep(candidates, client);
+    await runConcurrentDispatches(candidates, client);
 
     // Maintenance: closed-sweep, route rework labels, auto-advance, and
     // strip pipeline labels off Done tickets. Runs even when nothing was
@@ -1832,106 +2007,9 @@ export async function pollLoop(): Promise<void> {
     await runAutoAdvance(client, MAX_CONCURRENT);
     await runDoneCleanup(client);
 
-    // Auto-merge PRs for tickets in the Done column
-    try {
-      const doneItems = await client.getItemsByStatus("Done");
-      for (const item of doneItems) {
-        // Skip epics and items without issue numbers
-        if (item.issueNumber <= 0) continue;
-        // Skip if already merged (no open PR)
-        if (item.labels.includes("merged")) continue;
-        // Skip if already in conflict-block state — human is triaging.
-        // Without this, the auto-merge would loop on the same gh pr merge
-        // failure every cycle indefinitely (the pre-2026-05-08 bug). The
-        // label is stripped manually after `git merge origin/main` +
-        // resolution + push lands the conflict-resolved branch.
-        if (item.labels.includes("error:merge-conflict")) continue;
-
-        // Step 1: Look up the open PR. Side-effects ahead, so a separate
-        // try-catch — if the lookup itself fails (network / auth), skip
-        // silently and retry next cycle.
-        let prNumber: number;
-        try {
-          const prCheck = execSync(
-            `gh pr list --head "feature/${item.issueNumber}" --state open --json number --jq '.[0].number'`,
-            { cwd: repoRoot, encoding: "utf-8", timeout: 15_000 }
-          ).trim();
-          if (!prCheck) continue;
-          const parsed = parseInt(prCheck, 10);
-          if (isNaN(parsed)) continue;
-          prNumber = parsed;
-        } catch (e: any) {
-          // PR-list failures are transient (rate limit, network) — retry next cycle.
-          continue;
-        }
-
-        // Step 2: Try the actual merge. Conflict path is the special case.
-        try {
-          console.log(`   🔀 Auto-merging PR #${prNumber} for #${item.issueNumber} (moved to Done)`);
-          execSync(
-            `gh pr merge ${prNumber} --merge --delete-branch`,
-            { cwd: repoRoot, encoding: "utf-8", timeout: 30_000 }
-          );
-          // Pull merged changes to local main. Failure is non-fatal — the
-          // PR already merged on origin, so the next cycle's dispatch will
-          // re-pull and recover. But silent swallowing leaves stale local
-          // main propagating through subsequent cycles' dispatch setup
-          // (line 533) where the same `try {}` would swallow it again.
-          // Surface so operators see it in dispatcher logs.
-          try {
-            execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe", timeout: 15_000 });
-          } catch (e: any) {
-            console.warn(`   ⚠️  Post-merge git pull failed (will retry next cycle): ${e?.message ?? e}`);
-          }
-
-          // Clean up pipeline labels — they're noise on completed tickets.
-          for (const label of item.labels) {
-            if (isPipelineLabel(label)) {
-              try { await client.removeLabel(item.issueNumber, label); } catch {}
-            }
-          }
-
-          console.log(`   ✅ PR #${prNumber} merged, branch feature/${item.issueNumber} deleted, labels cleaned`);
-          await notifyDiscord(`🔀 PR #${prNumber} merged for #${item.issueNumber}: ${item.title}`);
-        } catch (e: any) {
-          // Combine stderr + message — execSync surfaces gh's stderr
-          // through both depending on Node version + how the process exited.
-          const errOut = `${e.stderr ?? ""}\n${e.message ?? ""}`;
-          if (isMergeConflictError(errOut)) {
-            // Label + comment, then bail out of retries via GLOBAL_BLOCK_LABELS.
-            // Idempotent guard above (`error:merge-conflict` skip) handles
-            // re-entry — but we got here, so the label isn't set yet.
-            console.warn(`   🛑 PR #${prNumber} for #${item.issueNumber} has merge conflicts — labelling for triage`);
-            try {
-              await client.addLabel(item.issueNumber, "error:merge-conflict");
-              await client.addComment(
-                item.issueNumber,
-                `## 🛑 Auto-merge blocked by merge conflict\n\n` +
-                `PR #${prNumber} cannot be merged into \`main\` cleanly. ` +
-                `The dispatcher has stopped retrying this PR; resolve the conflict manually:\n\n` +
-                `\`\`\`bash\n` +
-                `gh pr checkout ${prNumber}\n` +
-                `git fetch origin main\n` +
-                `git merge origin/main\n` +
-                `# resolve conflicts in your editor\n` +
-                `git push\n` +
-                `\`\`\`\n\n` +
-                `Then strip \`error:merge-conflict\` from this issue to resume the pipeline. ` +
-                `The dispatcher will pick the merge back up on its next cycle.\n\n` +
-                `*Filed automatically by dispatcher — pyrycode/agents commit log has the implementation.*`,
-              );
-              await notifyDiscord(`🛑 Merge conflict on PR #${prNumber} (#${item.issueNumber}) — labelled for human triage.`);
-            } catch (labelErr: any) {
-              console.warn(`   ⚠️  Failed to label/comment merge conflict on #${item.issueNumber}: ${labelErr.message ?? labelErr}`);
-            }
-            continue;
-          }
-          // Non-conflict failure (transient network, auth, etc.): silently retry next cycle.
-        }
-      }
-    } catch (error: any) {
-      console.error(`Error polling Done column: ${error.message}`);
-    }
+    // Auto-merge PRs for tickets in the Done column. Extracted to
+    // `runAutoMerge` below for testability.
+    await runAutoMerge(client);
 
     if (dispatched) {
       // Something was dispatched — restart cycle immediately so each in-flight

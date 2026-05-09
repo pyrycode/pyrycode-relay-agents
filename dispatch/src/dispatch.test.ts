@@ -286,24 +286,55 @@ export function execError(opts: { message?: string; status?: number; stderr?: st
 export class MockGitHubClient implements DispatchClient {
   labelsByIssue: Map<number, string[]>;
   statusByIssue: Map<number, string | null>;
+  /** Per-issueNumber backing for `getItemsByStatus` /
+   *  `getClosedItemsNotInDone` / `updateItemStatus`. Each entry
+   *  models one ProjectItem row on the board. Tests set this up
+   *  via the `items` constructor option. */
+  itemsByIssueNumber: Map<number, ProjectItem & { state: "OPEN" | "CLOSED" }>;
   defaultStatus: string | null;
   comments: { issueNumber: number; body: string }[] = [];
   addLabelCalls: { issueNumber: number; label: string }[] = [];
   removeLabelCalls: { issueNumber: number; label: string }[] = [];
   getItemStatusCalls: { issueNumber: number; forceRefresh: boolean | undefined }[] = [];
   getIssueLabelsCalls: number[] = [];
+  getItemsByStatusCalls: string[] = [];
+  getClosedItemsNotInDoneCalls = 0;
+  updateItemStatusCalls: { itemId: string; newStatus: string }[] = [];
   failures: {
     addLabel?: Error | ((issueNumber: number, label: string) => Error | null);
-    removeLabel?: Error;
+    removeLabel?: Error | ((issueNumber: number, label: string) => Error | null);
     addComment?: Error;
     getIssueLabels?: Error;
     getItemStatus?: Error;
+    getItemsByStatus?: Error;
+    getClosedItemsNotInDone?: Error;
+    updateItemStatus?: Error | ((itemId: string, newStatus: string) => Error | null);
   } = {};
 
-  constructor(opts: { labels?: Record<number, string[]>; status?: Record<number, string | null>; defaultStatus?: string | null } = {}) {
+  constructor(opts: {
+    labels?: Record<number, string[]>;
+    status?: Record<number, string | null>;
+    defaultStatus?: string | null;
+    /** Optional ProjectItem rows for tests that exercise
+     *  `getItemsByStatus` / `getClosedItemsNotInDone`. Each row carries
+     *  its own state (OPEN/CLOSED) — closed-sweep filters by it. */
+    items?: Array<Partial<ProjectItem> & { issueNumber: number; status?: string; state?: "OPEN" | "CLOSED" }>;
+  } = {}) {
     this.labelsByIssue = new Map(Object.entries(opts.labels ?? {}).map(([k, v]) => [parseInt(k, 10), [...v]]));
     this.statusByIssue = new Map(Object.entries(opts.status ?? {}).map(([k, v]) => [parseInt(k, 10), v]));
     this.defaultStatus = opts.defaultStatus ?? null;
+    this.itemsByIssueNumber = new Map();
+    for (const partial of opts.items ?? []) {
+      const item = makeProjectItem({
+        ...partial,
+        labels: partial.labels ?? this.labelsByIssue.get(partial.issueNumber) ?? [],
+        status: partial.status ?? this.statusByIssue.get(partial.issueNumber) ?? "Backlog",
+      });
+      this.itemsByIssueNumber.set(partial.issueNumber, { ...item, state: partial.state ?? "OPEN" });
+      if (!this.labelsByIssue.has(partial.issueNumber)) {
+        this.labelsByIssue.set(partial.issueNumber, [...item.labels]);
+      }
+    }
   }
 
   async addLabel(issueNumber: number, label: string): Promise<void> {
@@ -317,13 +348,24 @@ export class MockGitHubClient implements DispatchClient {
     const cur = this.labelsByIssue.get(issueNumber) ?? [];
     if (!cur.includes(label)) cur.push(label);
     this.labelsByIssue.set(issueNumber, cur);
+    // Keep the items map in sync so subsequent getItemsByStatus reflects it.
+    const item = this.itemsByIssueNumber.get(issueNumber);
+    if (item) item.labels = [...cur];
   }
 
   async removeLabel(issueNumber: number, label: string): Promise<void> {
     this.removeLabelCalls.push({ issueNumber, label });
-    if (this.failures.removeLabel) throw this.failures.removeLabel;
+    if (typeof this.failures.removeLabel === "function") {
+      const e = this.failures.removeLabel(issueNumber, label);
+      if (e) throw e;
+    } else if (this.failures.removeLabel) {
+      throw this.failures.removeLabel;
+    }
     const cur = this.labelsByIssue.get(issueNumber) ?? [];
-    this.labelsByIssue.set(issueNumber, cur.filter(l => l !== label));
+    const next = cur.filter(l => l !== label);
+    this.labelsByIssue.set(issueNumber, next);
+    const item = this.itemsByIssueNumber.get(issueNumber);
+    if (item) item.labels = [...next];
   }
 
   async addComment(issueNumber: number, body: string): Promise<void> {
@@ -341,7 +383,38 @@ export class MockGitHubClient implements DispatchClient {
     this.getItemStatusCalls.push({ issueNumber, forceRefresh: options?.forceRefresh });
     if (this.failures.getItemStatus) throw this.failures.getItemStatus;
     if (this.statusByIssue.has(issueNumber)) return this.statusByIssue.get(issueNumber)!;
+    const item = this.itemsByIssueNumber.get(issueNumber);
+    if (item) return item.status;
     return this.defaultStatus;
+  }
+
+  async getItemsByStatus(status: string): Promise<ProjectItem[]> {
+    this.getItemsByStatusCalls.push(status);
+    if (this.failures.getItemsByStatus) throw this.failures.getItemsByStatus;
+    return [...this.itemsByIssueNumber.values()]
+      .filter(i => i.state !== "CLOSED" && i.status === status)
+      .map(({ state: _state, ...item }) => item);
+  }
+
+  async getClosedItemsNotInDone(): Promise<ProjectItem[]> {
+    this.getClosedItemsNotInDoneCalls += 1;
+    if (this.failures.getClosedItemsNotInDone) throw this.failures.getClosedItemsNotInDone;
+    return [...this.itemsByIssueNumber.values()]
+      .filter(i => i.state === "CLOSED" && i.status !== "Done")
+      .map(({ state: _state, ...item }) => item);
+  }
+
+  async updateItemStatus(itemId: string, newStatus: string): Promise<void> {
+    this.updateItemStatusCalls.push({ itemId, newStatus });
+    if (typeof this.failures.updateItemStatus === "function") {
+      const e = this.failures.updateItemStatus(itemId, newStatus);
+      if (e) throw e;
+    } else if (this.failures.updateItemStatus) {
+      throw this.failures.updateItemStatus;
+    }
+    for (const item of this.itemsByIssueNumber.values()) {
+      if (item.id === itemId) item.status = newStatus;
+    }
   }
 }
 
