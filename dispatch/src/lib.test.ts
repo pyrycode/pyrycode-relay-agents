@@ -26,7 +26,7 @@ import {
   MID_PIPELINE_COLUMNS,
   PIPELINE_LABEL_PREFIXES,
   resolveAgentsRepoRoot,
-  resolvePyrycodeRepoRoot,
+  resolveTargetRepoRoot,
   isPipelineLabel,
   isPipelineLabelForAgent,
   decidePostRunLabels,
@@ -74,23 +74,37 @@ describe("resolveAgentsRepoRoot", () => {
   });
 });
 
-describe("resolvePyrycodeRepoRoot", () => {
-  test("resolves to the parent of agents/ — the pyrycode Go repo", () => {
-    // agents/ lives INSIDE pyrycode/, so pyrycode root = parent of agents/.
+describe("resolveTargetRepoRoot", () => {
+  test("resolves to the parent of agents/ — the target repo", () => {
+    // agents/ lives INSIDE the target repo, so target root = parent of agents/.
     // The original code had `agentsRepoRoot + "../pyrycode"`, which only
     // "worked" when agentsRepoRoot was buggy and pointed at pyrycode/.
     // Once that bug was fixed, this one surfaced — pyrycode/pyrycode/
     // doesn't exist. Lock the corrected derivation in.
-    const got = resolvePyrycodeRepoRoot("/work/pyrycode/agents");
+    const got = resolveTargetRepoRoot("/work/pyrycode/agents");
     assert.equal(got, "/work/pyrycode");
+  });
+
+  test("works for any consumer repo, not just pyrycode", () => {
+    // The dispatcher source is shared across forks (pyrycode-mobile-agents,
+    // pyrycode-relay-agents). Each fork's agents/ lives inside its own
+    // target repo; this resolver must not assume the name is "pyrycode".
+    assert.equal(
+      resolveTargetRepoRoot("/work/pyrycode-mobile/agents"),
+      "/work/pyrycode-mobile",
+    );
+    assert.equal(
+      resolveTargetRepoRoot("/work/pyrycode-relay/agents"),
+      "/work/pyrycode-relay",
+    );
   });
 
   test("composes correctly with resolveAgentsRepoRoot", () => {
     // End-to-end: from a hypothetical src/ directory, the pair of
-    // resolvers should land back at the pyrycode root.
+    // resolvers should land back at the target repo root.
     const agentsRoot = resolveAgentsRepoRoot("/work/pyrycode/agents/dispatch/src");
-    const pyrycodeRoot = resolvePyrycodeRepoRoot(agentsRoot);
-    assert.equal(pyrycodeRoot, "/work/pyrycode");
+    const targetRoot = resolveTargetRepoRoot(agentsRoot);
+    assert.equal(targetRoot, "/work/pyrycode");
   });
 });
 

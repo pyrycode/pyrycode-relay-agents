@@ -1120,17 +1120,21 @@ export function resolveAgentsRepoRoot(srcDir: string): string {
 }
 
 /**
- * Resolve the pyrycode Go repo root from the agents repo root.
+ * Resolve the target repo root from the agents repo root.
  *
- * `agents/` lives **inside** `pyrycode/` (gitignored there) rather than
- * as a sibling, so the pyrycode root is just the parent of agents/.
+ * `agents/` lives **inside** the target repo (gitignored there) rather
+ * than as a sibling, so the target root is just the parent of agents/.
+ * Works for any consumer of this dispatcher — pyrycode itself,
+ * pyrycode-mobile-agents → pyrycode-mobile, pyrycode-relay-agents →
+ * pyrycode-relay.
  *
- * The original code had `agentsRepoRoot + "../pyrycode"`, which silently
- * "worked" only because `agentsRepoRoot` was *also* buggy and pointed at
- * the pyrycode root. Once that bug was fixed, this one surfaced — first
- * dispatcher run after the fix tried `pyrycode/pyrycode/` and ENOENT'd.
+ * Historical note: original code had `agentsRepoRoot + "../pyrycode"`,
+ * which silently "worked" only because `agentsRepoRoot` was *also*
+ * buggy and pointed at the pyrycode root. Once that bug was fixed,
+ * this one surfaced — first dispatcher run after the fix tried
+ * `pyrycode/pyrycode/` and ENOENT'd.
  */
-export function resolvePyrycodeRepoRoot(agentsRepoRoot: string): string {
+export function resolveTargetRepoRoot(agentsRepoRoot: string): string {
   return resolve(agentsRepoRoot, "..");
 }
 

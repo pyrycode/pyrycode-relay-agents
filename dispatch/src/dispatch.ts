@@ -8,7 +8,7 @@ import { GitHubProjectClient } from "./github.js";
 import { AGENTS, type AgentConfig, type ProjectItem } from "./types.js";
 import {
   resolveAgentsRepoRoot,
-  resolvePyrycodeRepoRoot,
+  resolveTargetRepoRoot,
   shouldSkipDispatch,
   isPipelineLabel,
   isPipelineLabelForAgent,
@@ -39,10 +39,12 @@ import { runAutoAdvance, runReworkRouting } from "./reconcile.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentsRepoRoot = resolveAgentsRepoRoot(__dirname);
 
-// The main pyrycode/pyrycode repo — where code lives and agents work.
+// The target repo — where code lives and agents work.
+// (Item #2 from the activation rename — env var rename PYRYCODE_REPO_PATH →
+// TARGET_REPO_PATH — is a separate, breaking change deferred to its own ticket.)
 const repoRoot = process.env.PYRYCODE_REPO_PATH
   ? resolve(process.env.PYRYCODE_REPO_PATH)
-  : resolvePyrycodeRepoRoot(agentsRepoRoot);
+  : resolveTargetRepoRoot(agentsRepoRoot);
 
 config({ path: resolve(agentsRepoRoot, ".env") });
 
