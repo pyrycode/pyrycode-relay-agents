@@ -5,19 +5,19 @@
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 
-if ! pgrep -f "tsx.*src/dispatch.ts" >/dev/null; then
+if ! pgrep -f "tsx.*src/dispatch-bin\.ts" >/dev/null; then
   echo "no dispatcher running — starting fresh"
   exec "$SCRIPT_DIR/pyry-start"
 fi
 
 echo "draining current dispatcher..."
-pkill -TERM -f "tsx.*src/dispatch.ts"
+pkill -TERM -f "tsx.*src/dispatch-bin\.ts"
 
 # Poll until process exits. 30 min cap so we don't block forever on a stuck run.
 WAITED=0
-while pgrep -f "tsx.*src/dispatch.ts" >/dev/null; do
+while pgrep -f "tsx.*src/dispatch-bin\.ts" >/dev/null; do
   if [ "$WAITED" -ge 1800 ]; then
-    echo "still running after 30 min — bailing. Force-stop with: pkill -KILL -f dispatch.ts"
+    echo "still running after 30 min — bailing. Force-stop with: pkill -KILL -f dispatch-bin.ts"
     exit 1
   fi
   sleep 5

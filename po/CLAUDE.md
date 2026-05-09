@@ -228,4 +228,4 @@ Do NOT create the parent issue — it already exists, you're refining what the h
 
 - Pipeline architecture: `📋 Projects/2026-04-10 - Pyrycode/Pipeline.md` (in the vault) or `docs/agentic-workflow.md` (if present in the repo)
 - Sizing examples and past tickets: search QMD `pyrycode-docs` collection
-- The dispatcher's auto-label behavior: `agents/dispatch/src/dispatch.ts` around the `addLabel(item.issueNumber, "ready:" + agent.name)` call
+- The dispatcher's auto-label behavior: `agents/dispatcher/src/dispatch.ts` (submodule) around the `addLabel(item.issueNumber, "ready:" + agent.name)` call

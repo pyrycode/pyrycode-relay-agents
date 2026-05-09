@@ -1,14 +1,11 @@
-# Dependencies
-dispatch/node_modules/
-
-# Build
-dispatch/dist/
-
-# Environment
+# Environment (consumer-owned)
 .env
 
-# Runtime
-dispatch/logs/
-dispatch/.prompt-*
-dispatch/.system-prompt-*
+# Runtime artifacts (written by the dispatcher to <agentsRepoRoot>/)
+logs/
+.prompt-*
+.system-prompt-*
+
+# Codegraph index (lives in target repo, but stray dirs sometimes
+# end up here during dev; keep ignored just in case)
 .codegraph/

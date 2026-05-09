@@ -1,6 +1,10 @@
 #!/bin/sh
 # Run the dispatcher's TypeScript typecheck (`tsc --noEmit`).
+# pnpm install up front matches pyry-start's contract — a fresh
+# submodule checkout (or one with stale node_modules after a SHA bump)
+# Just Works. ~50ms no-op when up to date.
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR/../dispatch"
+cd "$SCRIPT_DIR/../dispatcher"
+pnpm install --silent
 exec pnpm typecheck

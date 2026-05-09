@@ -1,7 +1,7 @@
 #!/bin/sh
 # Report whether the dispatcher is running, and on which Node binary.
 # Exit 0 when running, 1 when stopped — usable in scripts.
-PID=$(pgrep -f "tsx.*src/dispatch.ts" | head -1)
+PID=$(pgrep -f "tsx.*src/dispatch-bin\.ts" | head -1)
 if [ -z "$PID" ]; then
   echo "stopped"
   exit 1

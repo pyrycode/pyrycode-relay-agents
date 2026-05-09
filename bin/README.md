@@ -1,9 +1,11 @@
 # agents/bin/
 
 Dispatcher operations as standalone scripts. Each is `chmod +x` and uses
-`dirname "$0"` to locate the dispatch dir relative to itself, so they
-work whether invoked from `agents/`, the project root, or anywhere else
-via absolute path.
+`dirname "$0"` to locate the `dispatcher/` submodule relative to itself, so
+they work whether invoked from `agents/`, the project root, or anywhere
+else via absolute path. `pyry-start` exports `AGENTS_REPO_PATH=$AGENTS_DIR`
+so the dispatcher knows where the consumer's per-agent CLAUDE.md files,
+`.env`, and runtime artifacts (`logs/`, `.prompt-*.txt`) live.
 
 ## Commands
 
@@ -14,8 +16,8 @@ via absolute path.
 | `pyry-status` | Report whether the dispatcher is running, on which Node binary, and since when. Exit 0 = running, 1 = stopped. |
 | `pyry-restart` | Drain → wait for in-flight dispatch to finish (30 min cap) → start fresh. |
 | `pyry-logs` | Tail dispatcher logs. `pyry-logs` (latest), `pyry-logs -a` (all), `pyry-logs <ticket>` (filter by issue number). |
-| `pyry-typecheck` | Run `pnpm typecheck` in `dispatch/`. |
-| `pyry-test` | Run `pnpm test` in `dispatch/`. Pass-through args. |
+| `pyry-typecheck` | Run `pnpm typecheck` in `dispatcher/` (the submodule). |
+| `pyry-test` | Run `pnpm test` in `dispatcher/` (the submodule). Pass-through args. |
 
 ## Invocation
 

@@ -2,7 +2,7 @@
 
 Agent instructions and dispatcher for [`pyrycode/pyrycode-relay`](https://github.com/pyrycode/pyrycode-relay).
 
-Forked from [`pyrycode/agents`](https://github.com/pyrycode/agents) on 2026-05-08. The dispatcher code is mirrored from the source repo for now; bug fixes need manual porting between the two until/unless the dispatcher gets a proper multi-repo refactor.
+Forked from [`pyrycode/agents`](https://github.com/pyrycode/agents) on 2026-05-08. As of 2026-05-09 the dispatcher source itself lives in [`pyrycode/agent-dispatcher`](https://github.com/pyrycode/agent-dispatcher) — a separate repo consumed via git submodule (see "Cloning" below). Only the relay-specific agent prompts (`architect/`, `developer/`, etc.) and `bin/` launcher scripts live in this repo.
 
 ## Layout
 
@@ -12,13 +12,33 @@ This repo is checked out as a nested subdirectory of `pyrycode-relay`:
 pyrycode-relay/                       (Go repo, public)
 ├── cmd/, internal/, docs/, ...
 └── agents/                           (this repo, private; gitignored above)
-    ├── architect/, developer/, ...
-    └── dispatch/                     (the TS dispatcher)
+    ├── architect/, developer/, ...   (relay-specific agent prompts)
+    ├── bin/                          (pyry-start, pyry-drain, ...)
+    └── dispatcher/                   (submodule → pyrycode/agent-dispatcher)
 ```
 
-## Syncing from upstream
+## Cloning
 
-Bug fixes to the dispatcher land in `pyrycode/agents` first; we cherry-pick the generic ones into this fork. Sync recipe (run before each session of relay-pipeline work):
+```bash
+git clone --recursive https://github.com/pyrycode/pyrycode-relay-agents agents
+```
+
+If you forgot `--recursive`:
+
+```bash
+cd agents && git submodule update --init
+```
+
+`bin/pyry-start` runs `pnpm install --silent` in the submodule on every restart, so submodule SHA bumps land cleanly without an extra step. To pull a newer dispatcher version:
+
+```bash
+cd dispatcher && git pull origin main && cd ..
+git add dispatcher && git commit -m "chore: bump dispatcher to <sha>"
+```
+
+## Syncing agent prompts from upstream
+
+Agent prompt fixes (e.g. an architect CLAUDE.md tweak) land in `pyrycode/agents` first; we cherry-pick the generic ones into this fork. Sync recipe (run before each session of relay-pipeline work):
 
 ```bash
 cd /Users/juhanailmoniemi/Workspace/Projects/pyrycode-relay/agents
@@ -28,7 +48,7 @@ git cherry-pick <sha>                          # for each generic commit
 git push origin main
 ```
 
-The `upstream` remote points at `https://github.com/pyrycode/agents`. Skip pyrycode-CLI-specific commits (e.g. anything that touches `agents/po/CLAUDE.md`'s qmd queries with `pyrycode-docs` collection, or pyrycode-flavoured architect spec patterns). Cherry-pick everything else.
+The `upstream` remote points at `https://github.com/pyrycode/agents`. Skip pyrycode-CLI-specific commits (anything that touches `po/CLAUDE.md`'s qmd queries with `pyrycode-docs` collection, or pyrycode-flavoured architect spec patterns). Dispatcher-source commits don't need cherry-picking anymore — bump the submodule pointer instead.
 
 If a cherry-pick conflicts on relay-specific customisations (Repo Context section in agent CLAUDE.md, README), resolve in favour of the relay version, then commit.
 
@@ -41,20 +61,31 @@ If a cherry-pick conflicts on relay-specific customisations (Repo Context sectio
 ## Running the dispatcher
 
 ```bash
-cd dispatch
-GITHUB_OWNER=pyrycode \
-GITHUB_REPO=pyrycode-relay \
-PROJECT_NUMBER=3 \
-GITHUB_TOKEN=$(gh auth token) \
-pnpm start
+./bin/pyry-start
 ```
 
-Available scripts (see `dispatch/package.json`):
+`.env` (gitignored, in this `agents/` dir) supplies the dispatcher with:
 
-- `pnpm start` — run the dispatcher loop (production-like).
-- `pnpm watch` — same, with `tsx --watch` so the dispatcher restarts on source changes (for dispatcher development).
-- `pnpm test` — unit tests.
-- `pnpm typecheck` — TypeScript check.
-- `pnpm drain` — send SIGTERM to a running dispatcher; it exits cleanly after the current dispatch completes.
+```
+GITHUB_OWNER=pyrycode
+GITHUB_REPO=pyrycode-relay
+PROJECT_NUMBER=3
+GITHUB_TOKEN=ghp_...
+TARGET_REPO_PATH=/absolute/path/to/pyrycode-relay
+```
 
-`PROJECT_NUMBER=3` is the [Pyrycode-Relay](https://github.com/orgs/pyrycode/projects/3) board (created 2026-05-08 by copying from Pyrycode). Run from a separate terminal than the pyrycode CLI dispatcher; per-repo concurrency caps via `PYRY_MAX_CONCURRENT`.
+`AGENTS_REPO_PATH` is exported by `bin/pyry-start` automatically.
+
+Available `bin/` scripts:
+
+| Script | Purpose |
+|---|---|
+| `pyry-start` | Start the dispatcher (foreground). |
+| `pyry-drain` | SIGTERM the running dispatcher; it finishes the current dispatch then exits. |
+| `pyry-restart` | Drain → wait → start. |
+| `pyry-status` | Is the dispatcher running? Which Node binary? |
+| `pyry-logs` | Tail dispatcher logs. |
+| `pyry-test` | Run dispatcher unit tests (in submodule). |
+| `pyry-typecheck` | `tsc --noEmit` (in submodule). |
+
+`PROJECT_NUMBER=3` is the [Pyrycode-Relay](https://github.com/orgs/pyrycode/projects/3) board (created 2026-05-08). Run from a separate terminal than the pyrycode CLI dispatcher; per-repo concurrency caps via `PYRY_MAX_CONCURRENT`.

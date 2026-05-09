@@ -5,7 +5,7 @@
 #
 # Idempotent — multiple SIGTERMs only print the drain notice once on the
 # dispatcher side. Safe to run if no dispatcher is up; reports it.
-if pkill -TERM -f "tsx.*src/dispatch.ts" 2>/dev/null; then
+if pkill -TERM -f "tsx.*src/dispatch-bin\.ts" 2>/dev/null; then
   echo "drain signal sent — dispatcher will exit after current dispatch completes"
 else
   echo "no dispatcher running"

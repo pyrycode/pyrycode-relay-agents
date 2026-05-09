@@ -1,7 +1,24 @@
 #!/bin/sh
-# Start the pyrycode dispatcher in the foreground.
+# Start the dispatcher in the foreground.
 # Pass-through any args to pnpm (e.g. `pyry-start --silent`).
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR/../dispatch"
+AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if [ ! -d "$AGENTS_DIR/dispatcher" ]; then
+  echo "error: dispatcher submodule missing at $AGENTS_DIR/dispatcher" >&2
+  echo "       run: cd $AGENTS_DIR && git submodule update --init" >&2
+  exit 1
+fi
+
+# Keep the submodule's node_modules in sync. Cheap no-op when up to date
+# (~50ms); guarantees a clean restart after a submodule SHA bump.
+cd "$AGENTS_DIR/dispatcher"
+pnpm install --silent
+
+# Tell the dispatcher where the consumer's agents repo lives. The
+# dispatcher reads per-agent CLAUDE.md, .env, and writes runtime
+# artifacts (logs/, .prompt-*.txt, .system-prompt-*.txt) here.
+export AGENTS_REPO_PATH="$AGENTS_DIR"
+
 exec pnpm start "$@"
