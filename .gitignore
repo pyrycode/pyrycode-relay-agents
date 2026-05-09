@@ -1,6 +1,11 @@
 # Environment (consumer-owned)
 .env
 
+# Dependencies (defense in depth — the dispatcher submodule has its
+# own .gitignore for dispatcher/node_modules/, but a generic rule here
+# covers any nested node_modules at agents/ root or beyond)
+node_modules/
+
 # Runtime artifacts (written by the dispatcher to <agentsRepoRoot>/)
 logs/
 .prompt-*
