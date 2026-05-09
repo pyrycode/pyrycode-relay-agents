@@ -28,6 +28,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  handleAgentResultErrors,
   makeDispatchContext,
   prepareAgentSpawn,
   setupBranchAndWorktree,
@@ -939,5 +940,178 @@ describe("prepareAgentSpawn", () => {
       const hasAgent = cfg.allowedTools.split(",").includes("Agent");
       assert.equal(hasAgent, c.hasAgentTool, `${c.name} Agent tool presence`);
     }
+  });
+});
+
+// =====================================================================
+// handleAgentResultErrors
+// =====================================================================
+//
+// 6 tests: not-error pass-through, max_turns + ready PR (treat as
+// success), max_turns + draft PR only (advance to safer-salvage),
+// max_turns + safer-salvage success, gh pr list failure, non-max_turns
+// throws to outer catch. Salvage path order matters — PR-already-exists
+// runs first because safer-salvage explicitly skips drafts.
+
+/** Compose a `StreamResult` with the fields handleAgentResultErrors reads. */
+function streamResult(overrides: Partial<StreamResult> = {}): StreamResult {
+  return {
+    output: "",
+    sessionId: "sess-test",
+    isError: false,
+    numTurns: 0,
+    totalCostUsd: 0,
+    durationMs: 0,
+    usage: {},
+    terminalReason: "stop",
+    rawResult: {},
+    ...overrides,
+  };
+}
+
+describe("handleAgentResultErrors", () => {
+  test("isError=false → returns false (no salvage, success path runs)", async () => {
+    const { ctx, client, calls } = makeTestContext({ item: { issueNumber: 300 } });
+
+    const saferSalvaged = await handleAgentResultErrors(streamResult({ isError: false }), ctx);
+
+    assert.equal(saferSalvaged, false);
+    // Hot exit: no execSync, no client mutations, no salvage paths.
+    assert.equal(calls.exec.length, 0);
+    assert.equal(client.addLabelCalls.length, 0);
+    assert.equal(client.comments.length, 0);
+  });
+
+  test("max_turns + non-draft PR exists → returns false ('treating as success'); no salvage label", async () => {
+    // The agent finished the work and ran out of turns on cleanup
+    // (todo updates, etc.). PR already opened → treat as success.
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 301 },
+      mockOptions: {
+        execImpls: {
+          // gh pr list returns a non-draft PR → findReadyPrNumber picks it.
+          "gh pr list --head": () => `[{"number": 42, "isDraft": false}]`,
+        },
+      },
+    });
+
+    const saferSalvaged = await handleAgentResultErrors(
+      streamResult({ isError: true, terminalReason: "max_turns" }),
+      ctx,
+    );
+
+    assert.equal(saferSalvaged, false, "PR-already-exists path leaves saferSalvaged=false");
+    // Crucially: no error:max_turns_salvaged label — that's only the
+    // safer-salvage path. PR-already-exists is a full success.
+    assert.ok(
+      !client.addLabelCalls.some(c => c.label === "error:max_turns_salvaged"),
+      "PR-already-exists must not apply the salvage block label",
+    );
+  });
+
+  test("max_turns + draft PR only → drafts skipped, advances to safer-salvage path (which succeeds here)", async () => {
+    // The salvage-path-order invariant: gh pr list returns ONLY draft
+    // PRs, so the PR-already-exists path's `findReadyPrNumber` returns
+    // null and we fall through to safer-salvage. Without the
+    // skip-drafts discipline, a draft (often the salvage helper's own
+    // earlier output) would get treated as success and auto-advance
+    // partial work — defeating the entire safer-salvage design.
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 302 },
+      mockOptions: {
+        execImpls: {
+          "gh pr list --head": () => `[{"number": 99, "isDraft": true}]`,
+          // Safer-salvage gates: dirty + clean vet + clean build.
+          "git status --porcelain": () => "M file.go\n",
+          // go vet + go build default to success (empty exec impl).
+        },
+        // attemptSaferSalvage's commit + push + pr-create all spawn.
+        // Default spawnSync returns status:0 → all succeed.
+      },
+    });
+
+    const saferSalvaged = await handleAgentResultErrors(
+      streamResult({ isError: true, terminalReason: "max_turns", output: "agent log tail" }),
+      ctx,
+    );
+
+    assert.equal(saferSalvaged, true, "draft-only PR must NOT short-circuit; safer-salvage must run");
+    assert.ok(
+      client.addLabelCalls.some(c => c.label === "error:max_turns_salvaged"),
+      "safer-salvage must apply the global-block label",
+    );
+  });
+
+  test("max_turns + safer-salvage success → returns true, salvage label applied, draft PR opened", async () => {
+    const { ctx, client, calls } = makeTestContext({
+      item: { issueNumber: 303 },
+      mockOptions: {
+        execImpls: {
+          "gh pr list --head": () => "[]",                  // no PR → fall through
+          "git status --porcelain": () => "M new.go\n",     // dirty → salvage gate passes
+          // go vet + go build default to success.
+        },
+      },
+    });
+
+    const saferSalvaged = await handleAgentResultErrors(
+      streamResult({ isError: true, terminalReason: "max_turns", numTurns: 70, totalCostUsd: 4.74, output: "last agent message" }),
+      ctx,
+    );
+
+    assert.equal(saferSalvaged, true);
+    assert.ok(
+      client.addLabelCalls.some(c => c.label === "error:max_turns_salvaged"),
+      "salvage path must apply the global-block label",
+    );
+    // Draft PR creation via spawnSync gh pr create.
+    const ghPrCreate = calls.spawn.find(s => s.cmd === "gh" && s.args.includes("pr") && s.args.includes("create"));
+    assert.ok(ghPrCreate, "salvage must invoke `gh pr create`");
+    assert.ok(ghPrCreate!.args.includes("--draft"), "salvage PR must be a DRAFT");
+    // Salvage comment posted to the issue.
+    assert.ok(client.comments.some(c => /Salvaged from `max_turns`/.test(c.body)));
+  });
+
+  test("gh pr list fails → SALVAGE_GH_FAILED warn, falls through; throws when neither salvage applies", async () => {
+    // Transient gh failure (network, auth, rate limit) was previously
+    // swallowed and downgraded a possible-success outcome to error.
+    // Now: surface the gh failure in the log + fall through. If
+    // safer-salvage also doesn't apply (clean tree), throw — same
+    // shape as a non-salvaged crash.
+    const { ctx } = makeTestContext({
+      item: { issueNumber: 304 },
+      mockOptions: {
+        execImpls: {
+          "gh pr list --head": () => execError({ stderr: "gh: API rate limit" }),
+          // Clean tree → safer-salvage gates fail → throws.
+          "git status --porcelain": () => "",
+        },
+      },
+    });
+
+    await assert.rejects(
+      handleAgentResultErrors(
+        streamResult({ isError: true, terminalReason: "max_turns" }),
+        ctx,
+      ),
+      /Agent error \(max_turns\)/,
+      "must throw when both salvage paths fail",
+    );
+  });
+
+  test("non-max_turns error → throws to outer catch (different failure shape, no salvage applies)", async () => {
+    const { ctx, calls } = makeTestContext({ item: { issueNumber: 305 } });
+
+    await assert.rejects(
+      handleAgentResultErrors(
+        streamResult({ isError: true, terminalReason: "api_error", output: "Anthropic 529" }),
+        ctx,
+      ),
+      /Agent error \(api_error\)/,
+    );
+    // Sanity: neither salvage path was probed (gh pr list runs only
+    // for max_turns; same for safer-salvage).
+    assert.equal(calls.exec.filter(c => c.cmd.includes("gh pr list")).length, 0);
+    assert.equal(calls.exec.filter(c => c.cmd.includes("git status")).length, 0);
   });
 });
