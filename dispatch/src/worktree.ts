@@ -196,6 +196,36 @@ export function resolveAgentsRepoRoot(srcDir: string): string {
 }
 
 /**
+ * Resolve the agents repo root with env-var precedence over the
+ * `__dirname`-based walk-up.
+ *
+ * Mirrors the existing `process.env.TARGET_REPO_PATH ?? resolveTargetRepoRoot()`
+ * pattern (added 2026-05-09 in commit `275c8a0`). Same shape, same fallback
+ * semantics — once the dispatcher source moves out of `agents/dispatch/src/`
+ * and into the standalone `pyrycode/agent-dispatcher` repo, the `__dirname`
+ * walk-up returns the wrong tree (the parent of `agent-dispatcher/`, not
+ * the consumer's `agents/`). Consumers set `AGENTS_REPO_PATH` explicitly
+ * via their `bin/pyry-start` launcher; the walk-up fallback exists only
+ * as a convenience for in-repo `pnpm exec tsx src/dispatch-bin.ts`
+ * invocations during the pre-split window.
+ *
+ * Empty string is treated as unset (a stray `AGENTS_REPO_PATH=` line in
+ * .env shouldn't silently resolve to the dispatcher's CWD).
+ *
+ * Pure decision; the caller (`dispatch.ts` module top) reads `process.env`
+ * and `__dirname` itself.
+ */
+export function resolveAgentsRepoRootWithEnv(opts: {
+  envValue: string | undefined;
+  fallbackSrcDir: string;
+}): string {
+  if (opts.envValue && opts.envValue.length > 0) {
+    return resolve(opts.envValue);
+  }
+  return resolveAgentsRepoRoot(opts.fallbackSrcDir);
+}
+
+/**
  * Resolve the target repo root from the agents repo root.
  *
  * `agents/` lives **inside** the target repo (gitignored there) rather

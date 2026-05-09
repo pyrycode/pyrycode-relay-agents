@@ -7,7 +7,7 @@ import { config } from "dotenv";
 import { GitHubProjectClient } from "./github.js";
 import { AGENTS, type AgentConfig, type ProjectItem } from "./types.js";
 import {
-  resolveAgentsRepoRoot,
+  resolveAgentsRepoRootWithEnv,
   resolveTargetRepoRoot,
   shouldSkipDispatch,
   isPipelineLabel,
@@ -35,11 +35,19 @@ import {
 } from "./lib.js";
 import { runAutoAdvance, runReworkRouting } from "./reconcile.js";
 
-// Load .env from agents repo root (where dispatch lives).
-// __dirname is agents/dispatch/src, so ../.. is agents/ root.
+// Load .env from the consumer's agents repo. AGENTS_REPO_PATH (set by
+// bin/pyry-start in the agents repo) takes precedence; falls back to a
+// __dirname walk-up — convenience for in-repo `pnpm exec tsx
+// src/dispatch-bin.ts` runs during the pre-split window. Once the
+// dispatcher source moves to pyrycode/agent-dispatcher, the walk-up
+// returns the wrong tree and the env var becomes mandatory in
+// production deployments.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const agentsRepoRoot = resolveAgentsRepoRoot(__dirname);
+const agentsRepoRoot = resolveAgentsRepoRootWithEnv({
+  envValue: process.env.AGENTS_REPO_PATH,
+  fallbackSrcDir: __dirname,
+});
 
 // The target repo — where code lives and agents work.
 // Falls through to resolveTargetRepoRoot (parent of agents/) when unset, so

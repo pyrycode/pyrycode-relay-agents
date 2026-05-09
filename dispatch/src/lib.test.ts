@@ -26,6 +26,7 @@ import {
   MID_PIPELINE_COLUMNS,
   PIPELINE_LABEL_PREFIXES,
   resolveAgentsRepoRoot,
+  resolveAgentsRepoRootWithEnv,
   resolveTargetRepoRoot,
   isPipelineLabel,
   isPipelineLabelForAgent,
@@ -106,6 +107,55 @@ describe("resolveTargetRepoRoot", () => {
     const agentsRoot = resolveAgentsRepoRoot("/work/pyrycode/agents/dispatch/src");
     const targetRoot = resolveTargetRepoRoot(agentsRoot);
     assert.equal(targetRoot, "/work/pyrycode");
+  });
+});
+
+describe("resolveAgentsRepoRootWithEnv", () => {
+  // The env-var precedence layer over `resolveAgentsRepoRoot`. Mirrors
+  // the existing pattern for `TARGET_REPO_PATH`/`resolveTargetRepoRoot`
+  // (added 2026-05-09). Reason for the layer: once the dispatcher source
+  // moves out of `agents/dispatch/src/` and into a standalone repo
+  // (`pyrycode/agent-dispatcher`), `__dirname`-based walk-up returns the
+  // wrong tree. Consumers set AGENTS_REPO_PATH explicitly via their
+  // bin/pyry-start launcher; the walk-up fallback exists only as a
+  // convenience for in-repo `pnpm exec tsx` invocations during the
+  // pre-split window.
+
+  test("env value takes precedence over the srcDir fallback", () => {
+    const got = resolveAgentsRepoRootWithEnv({
+      envValue: "/explicit/agents",
+      fallbackSrcDir: "/work/pyrycode/agents/dispatch/src",
+    });
+    assert.equal(got, "/explicit/agents");
+  });
+
+  test("falls back to resolveAgentsRepoRoot when env value is undefined", () => {
+    const got = resolveAgentsRepoRootWithEnv({
+      envValue: undefined,
+      fallbackSrcDir: "/work/pyrycode/agents/dispatch/src",
+    });
+    assert.equal(got, "/work/pyrycode/agents");
+  });
+
+  test("treats empty string env value as unset (falls back)", () => {
+    // process.env.X is "" (not undefined) when the var is exported but
+    // empty. Treat it as unset so an accidental `AGENTS_REPO_PATH=` line
+    // in .env doesn't silently resolve to the CWD.
+    const got = resolveAgentsRepoRootWithEnv({
+      envValue: "",
+      fallbackSrcDir: "/work/pyrycode/agents/dispatch/src",
+    });
+    assert.equal(got, "/work/pyrycode/agents");
+  });
+
+  test("normalizes the env value (resolves relative segments)", () => {
+    // Symmetry with resolve(process.env.TARGET_REPO_PATH). An absolute
+    // path with a `..` segment in the middle should normalize.
+    const got = resolveAgentsRepoRootWithEnv({
+      envValue: "/work/pyrycode/foo/../agents",
+      fallbackSrcDir: "/anywhere/else",
+    });
+    assert.equal(got, "/work/pyrycode/agents");
   });
 });
 
