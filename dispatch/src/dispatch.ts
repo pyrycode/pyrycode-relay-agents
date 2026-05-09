@@ -40,10 +40,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const agentsRepoRoot = resolveAgentsRepoRoot(__dirname);
 
 // The target repo — where code lives and agents work.
-// (Item #2 from the activation rename — env var rename PYRYCODE_REPO_PATH →
-// TARGET_REPO_PATH — is a separate, breaking change deferred to its own ticket.)
-const repoRoot = process.env.PYRYCODE_REPO_PATH
-  ? resolve(process.env.PYRYCODE_REPO_PATH)
+// Falls through to resolveTargetRepoRoot (parent of agents/) when unset, so
+// pyrycode/agents and forks that follow the agents-inside-target convention
+// work without any .env entry. Forks where agents/ is a sibling rather than
+// nested (e.g. pyrycode-mobile-agents pre-activation) must set this.
+const repoRoot = process.env.TARGET_REPO_PATH
+  ? resolve(process.env.TARGET_REPO_PATH)
   : resolveTargetRepoRoot(agentsRepoRoot);
 
 config({ path: resolve(agentsRepoRoot, ".env") });

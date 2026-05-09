@@ -1036,7 +1036,7 @@ export const SPAWN_ENV_DENYLIST: ReadonlySet<string> = new Set([
   "PROJECT_NUMBER",
   "DISCORD_WEBHOOK_URL",
   "PYRY_MAX_CONCURRENT",
-  "PYRYCODE_REPO_PATH",
+  "TARGET_REPO_PATH",
 ]);
 
 /**

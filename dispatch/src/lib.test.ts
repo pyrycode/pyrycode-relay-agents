@@ -1972,7 +1972,7 @@ describe("scrubSpawnEnv", () => {
       PROJECT_NUMBER: "1",
       DISCORD_WEBHOOK_URL: "https://discord.com/...",
       PYRY_MAX_CONCURRENT: "2",
-      PYRYCODE_REPO_PATH: "/repo",
+      TARGET_REPO_PATH: "/repo",
     };
     const out = scrubSpawnEnv(input);
     for (const denied of SPAWN_ENV_DENYLIST) {
