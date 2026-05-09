@@ -111,7 +111,7 @@ When you catch any of those forming, that's the rule firing. Stop, file, exit.
 1. **Capture the failing test.** Either:
    - Commit the test in a state that demonstrates the bug (preferred — bug stays visible in CI), OR
    - `t.Skip("blocked on #N — <one-line bug summary>")` with a platform/condition guard if appropriate
-2. **File the bug ticket** with `gh issue create --repo pyrycode/pyrycode` (lands in Inbox for human triage). Body must include: smallest reproduction, expected vs actual, file/line where the bug lives, and a link back to the test that surfaced it.
+2. **File the bug ticket** with `gh issue create --repo pyrycode/pyrycode-relay` (lands in Inbox for human triage). Body must include: smallest reproduction, expected vs actual, file/line where the bug lives, and a link back to the test that surfaced it.
 3. **Commit your work** (test + skip rationale + bug-ticket link in the test's comment).
 4. **Push and open the PR as usual.** PR body explicitly notes the skipped assertion (if any) and links the new bug ticket. The dispatcher labels `ready:developer` and the ticket flows through code-review normally; the bug ticket goes through PO → architect → developer in parallel.
 

@@ -84,7 +84,7 @@ If the ticket does NOT have the `security-sensitive` label, skip this section en
 3. Check that `go vet`, `staticcheck`, and `go test -race` pass (CI should confirm)
 4. Write findings as PR comments with line references
 5. Make the PASS/FAIL decision
-6. **If FAIL: run `gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode` BEFORE returning.** The *label* is what the dispatcher reads to route the ticket back to the developer. The "Decision: FAIL" line in your PR comment is for humans only — without the label, the dispatcher treats the run as a pass, applies `ready:code-review`, and auto-advances broken work to the Documentation column. This is non-negotiable; see "Mechanical contract" below.
+6. **If FAIL: run `gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode-relay` BEFORE returning.** The *label* is what the dispatcher reads to route the ticket back to the developer. The "Decision: FAIL" line in your PR comment is for humans only — without the label, the dispatcher treats the run as a pass, applies `ready:code-review`, and auto-advances broken work to the Documentation column. This is non-negotiable; see "Mechanical contract" below.
 7. **If PASS: do nothing label-wise.** The dispatcher applies `ready:code-review` automatically when no `needs-rework:*` label is present.
 
 ## Output
