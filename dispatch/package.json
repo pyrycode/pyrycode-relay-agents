@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx src/dispatch.ts",
-    "watch": "tsx --watch src/dispatch.ts",
+    "start": "tsx src/dispatch-bin.ts",
+    "watch": "tsx --watch src/dispatch-bin.ts",
     "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
-    "drain": "pkill -TERM -f 'tsx.*src/dispatch.ts' && echo 'SIGTERM sent — dispatcher will exit after current dispatch completes.'"
+    "drain": "pkill -TERM -f 'tsx.*src/dispatch-bin\\.ts' && echo 'SIGTERM sent — dispatcher will exit after current dispatch completes.'"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

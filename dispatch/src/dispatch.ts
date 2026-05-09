@@ -52,18 +52,12 @@ const repoRoot = process.env.TARGET_REPO_PATH
 
 config({ path: resolve(agentsRepoRoot, ".env") });
 
-// Validate required environment variables
-const REQUIRED_ENV = ["GITHUB_OWNER", "GITHUB_REPO", "PROJECT_NUMBER", "GITHUB_TOKEN"] as const;
-for (const key of REQUIRED_ENV) {
-  if (!process.env[key]) {
-    console.error(`Missing required environment variable: ${key}. Check .env file.`);
-    process.exit(1);
-  }
-}
-if (isNaN(parseInt(process.env.PROJECT_NUMBER!, 10))) {
-  console.error(`PROJECT_NUMBER must be a number, got: "${process.env.PROJECT_NUMBER}"`);
-  process.exit(1);
-}
+// Env-var validation moved to dispatch-bin.ts (the entry-point module).
+// Library callers don't need the dispatcher's env vars at import time —
+// `pollLoop` and `dispatchInbox` read process.env when they instantiate
+// `GitHubProjectClient`, so validation belongs at the entry point, not
+// at module load. This also means tests can `import` from dispatch.ts
+// without GITHUB_TOKEN set.
 
 // Discord notifications
 async function notifyDiscord(message: string): Promise<void> {
@@ -1641,7 +1635,7 @@ process.on("SIGTERM", () => {
   console.log("\n🚦 Drain mode: will exit after current dispatch completes.");
 });
 
-async function pollLoop(): Promise<void> {
+export async function pollLoop(): Promise<void> {
   const client = new GitHubProjectClient({
     owner: process.env.GITHUB_OWNER!,
     repo: process.env.GITHUB_REPO!,
@@ -1969,7 +1963,7 @@ async function pollLoop(): Promise<void> {
 // All three must succeed; partial state would orphan the issue (created
 // but not on board, or on board but null-status). If a step fails, error
 // out clearly so the user can clean up manually.
-async function dispatchInbox(request: string): Promise<void> {
+export async function dispatchInbox(request: string): Promise<void> {
   const client = new GitHubProjectClient({
     owner: process.env.GITHUB_OWNER!,
     repo: process.env.GITHUB_REPO!,
@@ -2006,41 +2000,25 @@ async function dispatchInbox(request: string): Promise<void> {
   console.log(`   or: gh project item-edit --id ${itemId} --project-id <id> --field-id <Status field id> --single-select-option-id <Backlog option id>`);
 }
 
-// Entry point — gated on "this file is the program's main module" so
-// `import` from a test file (or any other consumer) doesn't kick off
-// `pollLoop()`. Without this gate, `tsx --test src/*.test.ts` imports
-// dispatch.ts, falls through to the `else` branch below, and starts
-// polling the live GitHub Project — the test process becomes a real
-// dispatcher running against production state. Surfaced 2026-05-09
-// when the first test import accidentally re-attempted the auto-merge
-// of PR #236 against pyrycode/pyrycode.
-// argv[1] may be relative (e.g. `tsx src/dispatch.ts`); resolve before
-// comparing against the absolute __filename.
-const __isMain = !!process.argv[1] && resolve(process.argv[1]) === __filename;
-
-if (__isMain) {
-  const args = process.argv.slice(2);
-
-  if (args[0] === "inbox" && args[1]) {
-    dispatchInbox(args.slice(1).join(" ")).catch((e) => {
-      console.error("Fatal error in inbox dispatch:", e);
-      process.exit(1);
-    });
-  } else if (args[0] === "po" && args[1]) {
-    // Backwards-compat shim: old `pnpm start po "..."` now delegates to
-    // dispatchInbox with a deprecation notice. PO no longer runs on raw
-    // requests — it only refines triaged Backlog tickets.
-    console.warn("⚠️  `pnpm start po` is deprecated. Use `pnpm start inbox` instead.");
-    console.warn("    PO no longer creates tickets from raw requests; tickets land in Inbox");
-    console.warn("    and are promoted to Backlog manually when ready for PO to refine.\n");
-    dispatchInbox(args.slice(1).join(" ")).catch((e) => {
-      console.error("Fatal error in inbox dispatch:", e);
-      process.exit(1);
-    });
-  } else {
-    pollLoop().catch((e) => {
-      console.error("Fatal error in poll loop:", e);
-      process.exit(1);
-    });
-  }
+// Library-module guard. dispatch.ts exports phase functions, the
+// orchestrator, pollLoop, and dispatchInbox — but the entry-point
+// dispatch (CLI argv parsing, env-var validation) lives in
+// dispatch-bin.ts now. Running this file directly used to fall through
+// to pollLoop() against live state via an `else` branch on argv;
+// 2026-05-09 a test process accidentally became a real dispatcher
+// because of that pattern. The structural fix was the file split;
+// this refusal-guard catches anyone who tries the old `tsx
+// src/dispatch.ts` invocation and points them at the new entry point
+// instead of silently no-op'ing.
+//
+// Gate is intentionally explicit (not just dead-on-import): if a
+// future refactor adds entry-point code back here, this guard would
+// fire on direct invocation and surface the regression immediately.
+if (!!process.argv[1] && resolve(process.argv[1]) === __filename) {
+  console.error(
+    "dispatch.ts is a library module — run dispatch-bin.ts instead.\n" +
+    "  pnpm start                     # poll loop (the dispatcher)\n" +
+    "  pnpm start inbox \"<text>\"      # land a ticket in the Inbox column",
+  );
+  process.exit(1);
 }
