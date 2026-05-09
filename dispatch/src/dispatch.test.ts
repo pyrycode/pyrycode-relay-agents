@@ -24,8 +24,12 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   makeDispatchContext,
+  prepareAgentSpawn,
   setupBranchAndWorktree,
   type DispatchClient,
   type DispatchContext,
@@ -33,6 +37,11 @@ import {
   type StreamResult,
 } from "./dispatch.js";
 import type { AgentConfig, BlockerInfo, ProjectItem } from "./types.js";
+import { resolveAgentsRepoRoot } from "./worktree.js";
+
+// Recompute agentsRepoRoot the same way dispatch.ts does so test
+// fsMaps can use the absolute paths the production code resolves.
+const TEST_AGENTS_REPO_ROOT = resolveAgentsRepoRoot(dirname(fileURLToPath(import.meta.url)));
 
 // --------- Call log (assertion surface) ---------
 
@@ -777,5 +786,158 @@ describe("setupBranchAndWorktree — coverage edges", () => {
     const gitCmds = calls.exec.filter(c => c.cmd.startsWith("git"));
     assert.equal(gitCmds.length, 1, "PO path runs exactly one git command");
     assert.equal(gitCmds[0]!.cmd, "git checkout main && git pull");
+  });
+});
+
+// =====================================================================
+// prepareAgentSpawn
+// =====================================================================
+//
+// 5 tests: CLAUDE.md missing (the inline cleanup-skip path), the happy
+// path (asserting the SpawnConfig shape), QMD soft-fail, PO skips QMD,
+// and a parametric per-agent test for maxTurns + timeoutMs + Agent tool.
+
+/** Path the production code resolves for an agent's CLAUDE.md. */
+function claudeMdAbsPath(agentClaudeMdPath: string): string {
+  return resolve(TEST_AGENTS_REPO_ROOT, agentClaudeMdPath);
+}
+
+describe("prepareAgentSpawn", () => {
+  test("CLAUDE.md missing → comment + inline worktree cleanup + {ok:false}", async () => {
+    const { ctx, client, calls } = makeTestContext({
+      item: { issueNumber: 200 },
+      mockOptions: {
+        // fsMap empty → readFileSync throws ENOENT for the CLAUDE.md path.
+        fsMap: {},
+      },
+    });
+
+    const result = await prepareAgentSpawn(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /Agent CLAUDE\.md not found/);
+    assert.match(client.comments[0]!.body, /developer\/CLAUDE\.md/);
+    // Inline worktree cleanup fires here (the orchestrator's catch-all
+    // cleanup is skipped on early-return). Asserts the recovery
+    // behaviour without depending on the orchestrator path.
+    assert.ok(
+      calls.exec.some(c => c.cmd.includes("git worktree remove --force")),
+      "must clean up worktree inline since orchestrator skips cleanup on early-return",
+    );
+  });
+
+  test("happy path → returns {ok:true, config} with correct tools, turns, timeout, env", async () => {
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 201, title: "Test feature" },
+      mockOptions: {
+        fsMap: { [claudeMd]: "Mock developer system prompt" },
+        buildPromptResult: "## Mock prompt #201",
+      },
+    });
+
+    const result = await prepareAgentSpawn(ctx);
+
+    if (!result.ok) {
+      assert.fail(`expected ok:true, got ok:false`);
+    }
+    const config = result.config;
+    assert.equal(config.model, "opus");
+    assert.equal(config.effort, "high");
+    assert.equal(config.maxTurns, 70, "developer base budget post-2026-05-03 is 70");
+    assert.equal(config.cwd, ctx.agentCwd);
+    assert.equal(config.timeoutMs, 1_500_000, "developer = 25min");
+    // baseTools without Agent (developer doesn't sub-dispatch).
+    assert.ok(config.allowedTools.includes("Bash,Read,Write,Edit"));
+    assert.ok(config.allowedTools.includes("mcp__codegraph__"));
+    assert.ok(!config.allowedTools.includes(",Agent"), "developer must not get Agent tool");
+    // Env is scrubbed: no GITHUB_TOKEN, but CLAUDE_CODE_ENTRYPOINT set.
+    assert.equal(config.env.GITHUB_TOKEN, undefined, "GITHUB_TOKEN must be scrubbed");
+    assert.equal(config.env.CLAUDE_CODE_ENTRYPOINT, "developer");
+
+    // Both prompt + system-prompt files were written.
+    const writes = calls.fs.filter(f => f.kind === "write");
+    assert.equal(writes.length, 2, "exactly two writeFileSync calls (prompt + system prompt)");
+    assert.ok(writes.some(w => w.content === "## Mock prompt #201"));
+    assert.ok(writes.some(w => w.content === "Mock developer system prompt"));
+  });
+
+  test("QMD re-index fails → warning logged, dispatch continues", async () => {
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const { ctx } = makeTestContext({
+      item: { issueNumber: 202 },
+      mockOptions: {
+        fsMap: { [claudeMd]: "system prompt" },
+        execImpls: {
+          // QMD failure shape: stderr + non-zero exit. The catch surfaces
+          // both stderr and stdout in the warning; test just verifies the
+          // outer call still succeeds.
+          "qmd update": () => execError({ status: 1, stderr: "qmd: index lock taken" }),
+        },
+      },
+    });
+
+    const result = await prepareAgentSpawn(ctx);
+
+    // QMD failure is non-fatal — dispatch proceeds with the (stale) index.
+    assert.ok(result.ok, "QMD failure must not abort dispatch");
+  });
+
+  test("PO path skips QMD re-index (no useWorktree)", async () => {
+    const claudeMd = claudeMdAbsPath("po/CLAUDE.md");
+    const { ctx, calls } = makeTestContext({
+      agent: { name: "po", column: "Backlog", claudeMdPath: "po/CLAUDE.md", usesWorktree: false, producesCommits: false },
+      item: { issueNumber: 203 },
+      mockOptions: {
+        fsMap: { [claudeMd]: "po system prompt" },
+        // QMD execImpls absent — assertion below is "no qmd call ever".
+      },
+    });
+
+    const result = await prepareAgentSpawn(ctx);
+
+    assert.ok(result.ok);
+    // The QMD index lives in the worktree; running it in repoRoot would
+    // mutate main's index across other dispatcher cycles. Gate is
+    // `useWorktree` — PO has it false.
+    const qmdCalls = calls.exec.filter(c => c.cmd.includes("qmd"));
+    assert.equal(qmdCalls.length, 0, "PO must never invoke qmd (no isolated tree)");
+  });
+
+  test("agent-specific tools / turns / timeout", async () => {
+    // Parametric across agents. Asserts:
+    //   - architect + code-review get the `,Agent` tool suffix
+    //   - code-review = 100 turns + 40min, developer/docs = 70 turns + 25min,
+    //     others (architect, po) = 70 turns + 20min
+    // Field names mirror AgentConfig (`name`, not `agent`) so the
+    // makeAgentConfig overrides actually apply — passing `{agent:...}`
+    // would be silently dropped because AgentConfig has no such field.
+    const cases: Array<Partial<AgentConfig> & {
+      maxTurns: number; timeoutMs: number; hasAgentTool: boolean;
+    }> = [
+      { name: "architect",     column: "In Architecture",  claudeMdPath: "architect/CLAUDE.md",     usesWorktree: true,  producesCommits: true,  maxTurns: 70,  timeoutMs: 1_200_000, hasAgentTool: true },
+      { name: "developer",     column: "In Development",   claudeMdPath: "developer/CLAUDE.md",     usesWorktree: true,  producesCommits: true,  maxTurns: 70,  timeoutMs: 1_500_000, hasAgentTool: false },
+      { name: "code-review",   column: "In Code Review",   claudeMdPath: "code-review/CLAUDE.md",   usesWorktree: true,  producesCommits: false, maxTurns: 100, timeoutMs: 2_400_000, hasAgentTool: true },
+      { name: "documentation", column: "In Documentation", claudeMdPath: "documentation/CLAUDE.md", usesWorktree: true,  producesCommits: true,  maxTurns: 70,  timeoutMs: 1_500_000, hasAgentTool: false },
+      { name: "po",            column: "Backlog",          claudeMdPath: "po/CLAUDE.md",            usesWorktree: false, producesCommits: false, maxTurns: 70,  timeoutMs: 1_200_000, hasAgentTool: false },
+    ];
+
+    for (const c of cases) {
+      const claudeMd = claudeMdAbsPath(c.claudeMdPath!);
+      const { ctx } = makeTestContext({
+        agent: c,
+        item: { issueNumber: 250 },
+        mockOptions: { fsMap: { [claudeMd]: `${c.name} system prompt` } },
+      });
+
+      const result = await prepareAgentSpawn(ctx);
+      assert.ok(result.ok, `${c.name} prepareAgentSpawn must succeed`);
+      const cfg = (result as { ok: true; config: any }).config;
+      assert.equal(cfg.maxTurns, c.maxTurns, `${c.name} maxTurns`);
+      assert.equal(cfg.timeoutMs, c.timeoutMs, `${c.name} timeoutMs`);
+      const hasAgent = cfg.allowedTools.split(",").includes("Agent");
+      assert.equal(hasAgent, c.hasAgentTool, `${c.name} Agent tool presence`);
+    }
   });
 });
