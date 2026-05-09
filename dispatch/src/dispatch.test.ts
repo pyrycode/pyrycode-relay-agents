@@ -26,6 +26,7 @@ import { Buffer } from "node:buffer";
 
 import {
   makeDispatchContext,
+  setupBranchAndWorktree,
   type DispatchClient,
   type DispatchContext,
   type DispatchDeps,
@@ -418,5 +419,363 @@ describe("dispatch test harness", () => {
     assert.equal(calls.claudeStreams, 0);
     assert.equal(client.addLabelCalls.length, 0);
     assert.equal(client.comments.length, 0);
+  });
+});
+
+// =====================================================================
+// setupBranchAndWorktree
+// =====================================================================
+//
+// 12 tests: 5 failure modes + 6 decisions from `decideBranchSetup` +
+// orphan-worktree cleanup + codegraph soft-fails + the no-worktree
+// (PO/issue-0) path. Mock granularity is per-execSync-substring so a
+// test can flip "fast-forward" to "abort" by adjusting one handler.
+//
+// **Invariant under test (the load-bearing one):** every failure path
+// in this phase posts `error:<agent>` + a comment AND returns
+// `{ ok: false }` so the orchestrator skips `cleanupAfterDispatch` —
+// preserving the worktree (or the absence of one) as evidence for
+// human triage. The merge-conflict path is the one exception that
+// cleans up its own worktree (it just succeeded creating it).
+
+/**
+ * Empty-by-default exec baseline. Mock unmatched commands return empty
+ * string (success) — anything that should *succeed silently* needs no
+ * entry. Tests inject failure handlers for the specific commands they
+ * want to break, plus rev-parse handlers for branch-existence + SHA
+ * fixtures (those need specific output, not just success).
+ *
+ * Earlier draft put generic patterns like `"git branch "` here to
+ * "document the happy path"; that shadowed per-test overrides like
+ * `"git branch feature/101 main"` because object-key iteration matches
+ * the broader pattern first. Lesson: keep mock baselines small + per-test
+ * overrides specific.
+ */
+function happyExecBaseline(): Record<string, ExecHandler> {
+  return {};
+}
+
+describe("setupBranchAndWorktree — failure modes", () => {
+  test("update-main-fails on worktree path → error:<agent> label + comment + {ok:false}", async () => {
+    const { ctx, client, calls } = makeTestContext({
+      item: { issueNumber: 100 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          // The first git checkout fails — typically a non-fast-forward
+          // or a dirty working tree on main. Dispatch gives up before
+          // touching the feature branch.
+          "git checkout main && git pull": () => execError({ stderr: "error: cannot pull with rebase" }),
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 100, label: "error:developer" }]);
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /Failed to update main branch/);
+    // Sanity: we never advanced past the checkout — no fetch, no branch,
+    // no worktree add.
+    assert.ok(!calls.exec.some(c => c.cmd.includes("git fetch")), "fetch should not run after checkout fail");
+    assert.ok(!calls.exec.some(c => c.cmd.includes("git worktree add")), "worktree add should not run after checkout fail");
+  });
+
+  test("abort-local-ahead-of-origin → diverged commits + SHAs in comment, label, {ok:false}", async () => {
+    const { ctx, client, calls } = makeTestContext({
+      item: { issueNumber: 155 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          // Both refs exist; SHAs differ; local is NOT an ancestor of
+          // origin — the integrity-error path that surfaced in #155
+          // (2026-05-07).
+          "git rev-parse --verify feature/155": () => "",
+          "git rev-parse --verify origin/feature/155": () => "",
+          "git rev-parse origin/feature/155": () => "origin-sha-aaaaaaaa\n",
+          "git rev-parse feature/155": () => "local-sha-bbbbbbbb\n",
+          "git merge-base --is-ancestor": () => execError({ stderr: "" }),
+          // The diverged-commits log capture.
+          "git log --oneline -n 30": () => "bbbbbbbb local-only commit\n",
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 155, label: "error:developer" }]);
+    assert.equal(client.comments.length, 1);
+    const body = client.comments[0]!.body;
+    assert.match(body, /commits not present on origin/);
+    // The diverged-commits + SHA blocks both surface in the comment.
+    assert.match(body, /local-sha-bbbbbbbb/);
+    assert.match(body, /origin-sha-aaaaaaaa/);
+    assert.match(body, /Diverged commits/);
+    assert.match(body, /bbbbbbbb local-only commit/);
+    // No worktree creation should follow an integrity-error abort.
+    assert.ok(!calls.exec.some(c => c.cmd.includes("git worktree add")));
+  });
+
+  test("git branch creation throws → caught, label + comment + {ok:false}", async () => {
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 101 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          // Neither ref exists → create-from-main path.
+          "git rev-parse --verify feature/101": () => execError({ stderr: "fatal: need a single revision" }),
+          "git rev-parse --verify origin/feature/101": () => execError({ stderr: "fatal: need a single revision" }),
+          // The `git branch <name> main` itself fails (e.g. permission /
+          // index lock / corrupted refs).
+          "git branch feature/101 main": () => execError({ stderr: "fatal: cannot lock ref" }),
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 101, label: "error:developer" }]);
+    assert.match(client.comments[0]!.body, /Failed to set up branch/);
+    assert.match(client.comments[0]!.body, /create-from-main/);
+  });
+
+  test("git worktree add fails → label + comment + {ok:false}", async () => {
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 102 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/102": () => execError({ stderr: "fatal" }),
+          "git rev-parse --verify origin/feature/102": () => execError({ stderr: "fatal" }),
+          "git worktree add": () => execError({ stderr: "fatal: '<path>' already exists" }),
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 102, label: "error:developer" }]);
+    assert.match(client.comments[0]!.body, /Failed to create git worktree/);
+  });
+
+  test("merge-conflict on main → main feature → git merge --abort runs, worktree cleaned up inline, label + comment + {ok:false}", async () => {
+    const { ctx, client, calls } = makeTestContext({
+      item: { issueNumber: 103 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/103": () => execError({ stderr: "fatal" }),
+          "git rev-parse --verify origin/feature/103": () => execError({ stderr: "fatal" }),
+          // worktree creation succeeds, but the post-create merge fails.
+          "git merge main --no-edit": () => execError({ stderr: "CONFLICT (content): Merge conflict in foo.go" }),
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 103, label: "error:developer" }]);
+    assert.match(client.comments[0]!.body, /Merge conflict on branch/);
+
+    // The merge-conflict path is special: it just successfully created
+    // the worktree, so it cleans up its own worktree inline. Two markers:
+    //   1. `git merge --abort` runs (drains the failed merge state)
+    //   2. `git worktree remove --force` runs AFTER `git worktree add`
+    assert.ok(
+      calls.exec.some(c => c.cmd.includes("git merge --abort")),
+      "merge-conflict path must call `git merge --abort`",
+    );
+    const addIdx = calls.exec.findIndex(c => c.cmd.includes("git worktree add"));
+    const removeAfterAdd = calls.exec.slice(addIdx + 1).some(c => c.cmd.includes("git worktree remove --force"));
+    assert.ok(removeAfterAdd, "merge-conflict path must clean up its own worktree after creating it");
+  });
+});
+
+describe("setupBranchAndWorktree — decideBranchSetup branches", () => {
+  test("create-from-main → `git branch <name> main` invoked", async () => {
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 110 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/110": () => execError({ stderr: "fatal" }),
+          "git rev-parse --verify origin/feature/110": () => execError({ stderr: "fatal" }),
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(
+      calls.exec.some(c => c.cmd === "git branch feature/110 main"),
+      "expected `git branch feature/110 main` exactly",
+    );
+  });
+
+  test("create-from-origin → `git branch <name> origin/<name>` invoked", async () => {
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 111 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          // Local missing, remote present (recovery from prior dispatcher
+          // wipe — origin is canonical).
+          "git rev-parse --verify feature/111": () => execError({ stderr: "fatal" }),
+          "git rev-parse --verify origin/feature/111": () => "",
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(
+      calls.exec.some(c => c.cmd === "git branch feature/111 origin/feature/111"),
+      "expected `git branch feature/111 origin/feature/111` exactly",
+    );
+  });
+
+  test("fast-forward-from-origin → `git branch -f <name> origin/<name>` invoked", async () => {
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 112 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/112": () => "",
+          "git rev-parse --verify origin/feature/112": () => "",
+          // SHAs differ, local IS an ancestor of origin — fast-forward path.
+          "git rev-parse origin/feature/112": () => "newer-origin-sha\n",
+          "git rev-parse feature/112": () => "older-local-sha\n",
+          "git merge-base --is-ancestor": () => "",  // exits 0 → ancestor
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(
+      calls.exec.some(c => c.cmd === "git branch -f feature/112 origin/feature/112"),
+      "expected `git branch -f feature/112 origin/feature/112` exactly",
+    );
+  });
+
+  test("reuse-local-already-synced → no `git branch ...` invoked (no-op sync)", async () => {
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 113 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/113": () => "",
+          "git rev-parse --verify origin/feature/113": () => "",
+          // SHAs equal → reuse local, no branch mutation needed.
+          "git rev-parse origin/feature/113": () => "matching-sha\n",
+          "git rev-parse feature/113": () => "matching-sha\n",
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    // No `git branch <name> ...` mutation should happen — local is already canonical.
+    const branchCmds = calls.exec.filter(c =>
+      /^git branch (?!-f )(feature\/113|-f feature\/113)/.test(c.cmd),
+    );
+    assert.equal(branchCmds.length, 0, "reuse-local-already-synced must not invoke git branch");
+  });
+});
+
+describe("setupBranchAndWorktree — coverage edges", () => {
+  test("orphan worktree on same branch → removed before `git worktree add`", async () => {
+    // The 2026-05-02 lesson: a previous cycle's worktree (e.g.
+    // `architect-100`) on `feature/100` was never cleaned up; this
+    // cycle wants `developer-100` on the same branch. Without orphan
+    // cleanup, `git worktree add` fails with "branch is already checked
+    // out at <other-path>", error:<agent> applied, dispatcher stuck.
+    // The orphan loop should remove it BEFORE adding the new worktree.
+    const orphanPath = "/tmp/.pyrycode-worktrees/architect-114";
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 114 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/114": () => "",
+          "git rev-parse --verify origin/feature/114": () => "",
+          "git rev-parse origin/feature/114": () => "same\n",
+          "git rev-parse feature/114": () => "same\n",
+          "git worktree list --porcelain": () =>
+            `worktree ${orphanPath}\nHEAD abc123\nbranch refs/heads/feature/114\n\n`,
+        },
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    // The orphan-removal call must precede the worktree-add call.
+    const orphanRemoveIdx = calls.exec.findIndex(c =>
+      c.cmd.includes(`git worktree remove --force "${orphanPath}"`),
+    );
+    const addIdx = calls.exec.findIndex(c => c.cmd.includes("git worktree add"));
+    assert.ok(orphanRemoveIdx >= 0, "orphan worktree removal must happen");
+    assert.ok(addIdx > orphanRemoveIdx, "orphan removal must precede `git worktree add`");
+  });
+
+  test("codegraph symlink — source missing → warn, no symlink, still {ok:true}", async () => {
+    // `decideCodegraphSymlink({sourceExists:false, destExists:false})`
+    // returns `skip / no-source` — caller should warn but not fail.
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 115 },
+      mockOptions: {
+        execImpls: {
+          ...happyExecBaseline(),
+          "git rev-parse --verify feature/115": () => execError({ stderr: "fatal" }),
+          "git rev-parse --verify origin/feature/115": () => execError({ stderr: "fatal" }),
+        },
+        // fsMap empty → existsSync returns false for everything,
+        // including the .codegraph source.
+        fsMap: {},
+      },
+    });
+
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true }, "missing codegraph source must not block dispatch");
+    // No symlink should have been issued — the existsSync check on the
+    // source returned false (empty fsMap), so decideCodegraphSymlink
+    // returns skip/no-source.
+    assert.equal(
+      calls.fs.filter(c => c.kind === "symlink").length,
+      0,
+      "no symlinkSync should be invoked when source is missing",
+    );
+  });
+
+  test("PO / issue-0 path → `git checkout main && git pull` only, returns {ok:true}", async () => {
+    // PO has `usesWorktree: false`. The setup phase should short-circuit:
+    // pull main, return ok. No fetch, no branch ops, no worktree creation.
+    const { ctx, client, calls } = makeTestContext({
+      agent: { name: "po", column: "Backlog", claudeMdPath: "po/CLAUDE.md", usesWorktree: false, producesCommits: false },
+      item: { issueNumber: 116 },
+      mockOptions: { execImpls: happyExecBaseline() },
+    });
+
+    assert.equal(ctx.useWorktree, false, "PO ctx must have useWorktree=false");
+    const result = await setupBranchAndWorktree(ctx);
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(client.addLabelCalls.length, 0, "PO success path must not label");
+    assert.equal(client.comments.length, 0, "PO success path must not comment");
+    // The only git command should be the checkout/pull.
+    const gitCmds = calls.exec.filter(c => c.cmd.startsWith("git"));
+    assert.equal(gitCmds.length, 1, "PO path runs exactly one git command");
+    assert.equal(gitCmds[0]!.cmd, "git checkout main && git pull");
   });
 });
