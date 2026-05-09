@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   cleanupAfterDispatch,
+  dispatchToAgent,
   handleAgentResultErrors,
   handleDispatchError,
   handlePostRun,
@@ -1563,5 +1564,223 @@ describe("cleanupAfterDispatch", () => {
 
     // Must NOT throw.
     await assert.doesNotReject(cleanupAfterDispatch(ctx));
+  });
+});
+
+// =====================================================================
+// dispatchToAgent — orchestrator integration
+// =====================================================================
+//
+// 5 end-to-end tests asserting the WIRING of the six phase functions.
+// The phase functions themselves are tested above; this suite verifies
+// the orchestrator threads the right context, handles early returns
+// correctly, and respects the cleanup-skip vs cleanup-runs invariants.
+//
+// **The load-bearing invariant:** when a phase returns {ok:false}
+// from inside the try block (push-fail, empty-branch guard) or before
+// the try (setup, prepareSpawn fail), `cleanupAfterDispatch` is
+// DELIBERATELY skipped — the worktree (and main-repo state) is
+// preserved as evidence for human triage. When a phase throws,
+// handleDispatchError runs AND cleanup runs (clean teardown after
+// labelling).
+
+/** Distinguishing marker: cleanup ran iff calls.exec contains `git checkout -- .` */
+function cleanupRan(execCalls: { cmd: string }[]): boolean {
+  return execCalls.some(c => c.cmd === "git checkout -- .");
+}
+
+/** Mock setup that lets dispatchToAgent walk the full happy path. */
+function fullHappyExecImpls(branch: string): Record<string, ExecHandler> {
+  return {
+    [`git rev-parse --verify ${branch}`]: () => execError({ stderr: "fatal" }),
+    [`git rev-parse --verify origin/${branch}`]: () => execError({ stderr: "fatal" }),
+    "git status --porcelain": () => "",
+    "git rev-list --count main..": () => "1\n",
+  };
+}
+
+describe("dispatchToAgent — orchestrator integration", () => {
+  test("happy-path full run → setup + spawn + stream + post-run all green; ready:<agent> + cleanup runs", async () => {
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 700: "In Development" },
+      labels: { 700: [] },
+    });
+    const item = makeProjectItem({ issueNumber: 700 });
+    const agent = makeAgentConfig({});
+    const { deps, calls } = makeMockDeps({
+      execImpls: fullHappyExecImpls("feature/700"),
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+
+    await dispatchToAgent(agent, item, client, deps);
+
+    // ready:developer applied (post-success labeling).
+    assert.ok(client.addLabelCalls.some(c => c.label === "ready:developer"));
+    // No error labels.
+    assert.ok(!client.addLabelCalls.some(c => c.label.startsWith("error:")));
+    // Cleanup ran (the marker command).
+    assert.ok(cleanupRan(calls.exec), "happy path must run cleanupAfterDispatch");
+    // Streaming was invoked exactly once.
+    assert.equal(calls.claudeStreams, 1);
+    // Success Discord notify.
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^✅/);
+  });
+
+  test("setup-fails (push-equivalent: empty-branch from handlePostRun) → cleanup-skipped invariant", async () => {
+    // The push-fail and empty-branch return paths preserve the
+    // worktree as evidence. Reproduces with empty-branch (rev-list
+    // returns 0) — handlePostRun returns {ok:false} from inside the
+    // try block, the orchestrator sees it and returns BEFORE the
+    // unconditional cleanup at the end. The worktree + leaked .claude
+    // files stay intact for the human triager.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 701: "In Development" },
+      labels: { 701: [] },
+    });
+    const item = makeProjectItem({ issueNumber: 701 });
+    const agent = makeAgentConfig({});
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        ...fullHappyExecImpls("feature/701"),
+        // Override: branch is 0 ahead of main → empty-branch guard
+        // fires for developer (producesCommits=true).
+        "git rev-list --count main..": () => "0\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+
+    await dispatchToAgent(agent, item, client, deps);
+
+    // error:developer applied by handlePostRun.
+    assert.ok(client.addLabelCalls.some(c => c.label === "error:developer"));
+    // Critically: cleanup did NOT run. Worktree preserved as evidence.
+    assert.ok(
+      !cleanupRan(calls.exec),
+      "empty-branch return from handlePostRun must skip cleanupAfterDispatch (preserves worktree as evidence)",
+    );
+  });
+
+  test("outer catch path → cleanup-runs invariant; error label + Discord notify", async () => {
+    // Agent threw a non-max_turns error → handleAgentResultErrors
+    // throws → outer catch catches → handleDispatchError runs (label,
+    // comment, Discord) → falls through to cleanupAfterDispatch.
+    // Distinct from the {ok:false} early-return paths: thrown errors
+    // produce a clean teardown; structural failure paths preserve state.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 702: "In Development" },
+      labels: { 702: [] },
+    });
+    const item = makeProjectItem({ issueNumber: 702 });
+    const agent = makeAgentConfig({});
+    const { deps, calls } = makeMockDeps({
+      execImpls: fullHappyExecImpls("feature/702"),
+      fsMap: { [claudeMd]: "developer system prompt" },
+      // Stream returns a non-max_turns error → handleAgentResultErrors throws.
+      streamResult: streamResult({ isError: true, terminalReason: "api_error", output: "Anthropic 529" }),
+    });
+
+    await dispatchToAgent(agent, item, client, deps);
+
+    // handleDispatchError applied error:developer.
+    assert.ok(client.addLabelCalls.some(c => c.label === "error:developer"));
+    // Discord notify (one ❌ message).
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^❌/);
+    // Cleanup DID run — clean teardown after the catch.
+    assert.ok(
+      cleanupRan(calls.exec),
+      "thrown errors run handleDispatchError + cleanupAfterDispatch (no preservation needed once labelled)",
+    );
+  });
+
+  test("safer-salvage path → label salvage + skip ready label + cleanup runs", async () => {
+    // Stream returns max_turns + uncommitted clean code →
+    // handleAgentResultErrors triggers safer-salvage, returns
+    // saferSalvaged=true → handlePostRun sees the flag and skips
+    // ready:<agent> + success comment + success Discord →
+    // returns {ok:true} → cleanup runs.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 703: "In Development" },
+      labels: { 703: [] },
+    });
+    const item = makeProjectItem({ issueNumber: 703 });
+    const agent = makeAgentConfig({});
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        ...fullHappyExecImpls("feature/703"),
+        // Salvage gates: gh pr list returns no PRs → fall through to
+        // safer-salvage; git status dirty → salvage gate passes;
+        // go vet + go build default to success.
+        "gh pr list --head": () => "[]",
+        "git status --porcelain": () => "M file.go\n",
+        // After salvage commits, rev-list returns 1 (1 commit ahead).
+        // But empty-branch guard is gated on !saferSalvaged so it
+        // doesn't run anyway.
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+      streamResult: streamResult({
+        isError: true,
+        terminalReason: "max_turns",
+        numTurns: 70,
+        totalCostUsd: 4.74,
+        output: "agent log tail",
+      }),
+    });
+
+    await dispatchToAgent(agent, item, client, deps);
+
+    // Salvage label applied.
+    assert.ok(client.addLabelCalls.some(c => c.label === "error:max_turns_salvaged"));
+    // No ready:<agent> (suppressed by saferSalvaged=true).
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+    // No error:<agent> either (salvage is the canonical signal here).
+    assert.ok(!client.addLabelCalls.some(c => c.label === "error:developer"));
+    // Salvage notify (one 💾 message from attemptSaferSalvage; no
+    // additional success notify because !saferSalvaged is false in
+    // handlePostRun).
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^💾/);
+    // Cleanup DID run — salvage path is structurally a success
+    // ({ok:true} from handlePostRun), so cleanup proceeds.
+    assert.ok(cleanupRan(calls.exec));
+  });
+
+  test("CLAUDE.md missing (prepareAgentSpawn early-return) → orchestrator-cleanup skipped (inline cleanup happens)", async () => {
+    // prepareAgentSpawn returns {ok:false} when the agent's CLAUDE.md
+    // is missing. The orchestrator returns BEFORE the unconditional
+    // cleanup. prepareAgentSpawn does its own inline `git worktree
+    // remove --force` (since the orchestrator's outer cleanup is
+    // skipped on its return path) — but the orchestrator-cleanup's
+    // distinguishing marker (`git checkout -- .`) does NOT fire.
+    const client = new MockGitHubClient({
+      status: { 704: "In Development" },
+      labels: { 704: [] },
+    });
+    const item = makeProjectItem({ issueNumber: 704 });
+    const agent = makeAgentConfig({});
+    const { deps, calls } = makeMockDeps({
+      execImpls: fullHappyExecImpls("feature/704"),
+      fsMap: {},  // empty → CLAUDE.md missing → prepareAgentSpawn fails
+    });
+
+    await dispatchToAgent(agent, item, client, deps);
+
+    // CLAUDE.md missing comment posted by prepareAgentSpawn.
+    assert.ok(client.comments.some(c => /Agent CLAUDE\.md not found/.test(c.body)));
+    // Stream was never invoked.
+    assert.equal(calls.claudeStreams, 0);
+    // Inline worktree removal DID happen (in prepareAgentSpawn's catch).
+    assert.ok(calls.exec.some(c => c.cmd.includes("git worktree remove --force")));
+    // But the orchestrator's full cleanup did NOT run — its marker is
+    // `git checkout -- .` which lives only in cleanupAfterDispatch.
+    assert.ok(
+      !cleanupRan(calls.exec),
+      "prepareAgentSpawn early-return must skip cleanupAfterDispatch (inline cleanup is the path here)",
+    );
   });
 });
