@@ -44,6 +44,27 @@ export interface AgentConfig {
    * the safety-net commit).
    */
   usesWorktree: boolean;
+  /**
+   * True if this agent is expected to produce commits during a normal
+   * successful run (architect writes specs, developer writes code,
+   * documentation writes docs). False for agents whose output is
+   * GitHub-side only — comments on the issue (PO) or comments on the
+   * PR (code-review).
+   *
+   * Distinct from `usesWorktree`: code-review uses a worktree (it reads
+   * code locally) but never commits. The empty-branch guard fires only
+   * on agents where `producesCommits === true && commitsAhead === 0`
+   * after a successful run — surfaces silent failures where the agent
+   * exited cleanly without doing the work (relay #5: architect refused
+   * without spec, developer refused without spec, code-review couldn't
+   * apply needs-rework labels because they didn't exist in the repo —
+   * board marched to Done with feature/5 unchanged from main).
+   *
+   * Predicate is `shouldProduceCommits()` in lib.ts. The guard itself
+   * is in dispatch.ts after the post-run push, before the post-success
+   * labeling block.
+   */
+  producesCommits: boolean;
 }
 
 // 5-agent pipeline: PO → Architect → Developer → Code Review → Documentation
@@ -55,6 +76,7 @@ export const AGENTS: AgentConfig[] = [
     claudeMdPath: "po/CLAUDE.md",
     description: "Product Owner — creates structured issues",
     usesWorktree: false, // operates on issue body via gh, no commits
+    producesCommits: false, // GH-side only (issue body, comments, labels)
   },
   {
     name: "architect",
@@ -62,6 +84,7 @@ export const AGENTS: AgentConfig[] = [
     claudeMdPath: "architect/CLAUDE.md",
     description: "System Architect — defines Go interfaces, data flows, concurrency patterns",
     usesWorktree: true, // writes spec to docs/specs/architecture/
+    producesCommits: true, // commits the spec
   },
   {
     name: "developer",
@@ -69,6 +92,7 @@ export const AGENTS: AgentConfig[] = [
     claudeMdPath: "developer/CLAUDE.md",
     description: "Developer — implements Go code with tests",
     usesWorktree: true, // writes Go code + tests
+    producesCommits: true, // commits implementation + tests
   },
   {
     name: "code-review",
@@ -76,6 +100,7 @@ export const AGENTS: AgentConfig[] = [
     claudeMdPath: "code-review/CLAUDE.md",
     description: "Code Reviewer — reviews PRs for Go quality and correctness",
     usesWorktree: true, // reads code locally to review
+    producesCommits: false, // PR comments only via `gh pr review`
   },
   {
     name: "documentation",
@@ -83,5 +108,6 @@ export const AGENTS: AgentConfig[] = [
     claudeMdPath: "documentation/CLAUDE.md",
     description: "Documentation Agent — synthesizes project knowledge base",
     usesWorktree: true, // writes to docs/
+    producesCommits: true, // commits doc updates
   },
 ];

@@ -841,6 +841,72 @@ export function shouldAutoCommit(gitStatusOutput: string): boolean {
   return gitStatusOutput.trim().length > 0;
 }
 
+// --------- Empty-branch guard ---------
+
+/**
+ * True if this agent is expected to produce commits during a normal
+ * successful run. The empty-branch guard fires only on agents where
+ * this is true AND the post-run branch is 0 ahead of `main`.
+ *
+ * Reads `agent.producesCommits` (declared in types.ts). Distinct from
+ * `shouldUseWorktree`: code-review uses a worktree (reads code) but
+ * never commits — its output is PR comments via `gh pr review`.
+ *
+ * Surfaced by relay #5 (2026-05-08): architect refused to spec without
+ * blocker resolution, developer refused to code without spec, code-review
+ * couldn't apply `needs-rework:developer` because that label didn't
+ * exist in the relay repo — and the dispatcher march-marched the ticket
+ * across every column to "Done" with `feature/5` unchanged from main.
+ * The fix is deterministic: don't trust the agent's prose about whether
+ * work happened; verify by counting commits.
+ */
+export function shouldProduceCommits(agent: AgentConfig): boolean {
+  return agent.producesCommits;
+}
+
+/**
+ * Parse the integer count from `git rev-list --count <base>..<branch>`.
+ * Returns -1 on unparseable input — caller treats as "git output
+ * unknown, don't act on it" (safer than treating garbage as 0 and
+ * falsely flagging a successful run as empty).
+ *
+ * The git command itself either succeeds with a single integer line or
+ * exits non-zero (then `execSync` throws and the caller's `catch`
+ * leaves `commitsAhead` at -1). This function only exists so the
+ * parsing is testable without shelling out — the contract is "trust
+ * a parsed integer; treat anything else as unknown."
+ */
+export function parseCommitsAhead(revListOutput: string): number {
+  const trimmed = revListOutput.trim();
+  if (trimmed.length === 0) return -1;
+  const n = Number.parseInt(trimmed, 10);
+  if (Number.isNaN(n)) return -1;
+  return n;
+}
+
+/**
+ * True iff the dispatcher should treat this agent's post-run branch
+ * state as a silent failure — the agent was expected to produce
+ * commits but the branch is still 0 ahead of `main`.
+ *
+ * Caller side (in dispatch.ts) wraps this in:
+ *   - `useWorktree` gate (no worktree = no branch to count against)
+ *   - `!saferSalvaged` gate (salvage path manages its own labeling)
+ *   - error-handling around the `git rev-list` call (treat throw as -1)
+ *
+ * Returns false on negative `commitsAhead` (parse failed or git errored)
+ * — the dispatcher prefers to advance the ticket and let downstream
+ * gates catch the issue rather than block on uncertain state.
+ *
+ * See `shouldProduceCommits` for the per-agent classification and the
+ * relay #5 incident that motivated this guard.
+ */
+export function shouldFlagEmptyBranch(agent: AgentConfig, commitsAhead: number): boolean {
+  if (!shouldProduceCommits(agent)) return false;
+  if (commitsAhead < 0) return false;
+  return commitsAhead === 0;
+}
+
 // Built from AGENTS — single source of truth for the name → column mapping.
 export const AGENT_COLUMN_MAP: ReadonlyMap<string, string> = new Map(
   AGENTS.map((a: AgentConfig) => [a.name, a.column]),

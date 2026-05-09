@@ -42,6 +42,9 @@ import {
   decideDoneCleanup,
   shouldAutoCommit,
   shouldUseWorktree,
+  shouldProduceCommits,
+  parseCommitsAhead,
+  shouldFlagEmptyBranch,
   hasOpenBlockers,
   shouldSkipBlockedFor,
   extractReworkCount,
@@ -1474,7 +1477,7 @@ describe("maxTurnsFor", () => {
     // Defensive: a typo or new agent shouldn't silently dispatch with
     // 0 turns. The policy returns the base budget for any non-code-review
     // name; if a future agent needs more, it must be added explicitly.
-    assert.equal(maxTurnsFor({ name: "ghost", column: "", claudeMdPath: "", description: "", usesWorktree: false }), 70);
+    assert.equal(maxTurnsFor({ name: "ghost", column: "", claudeMdPath: "", description: "", usesWorktree: false, producesCommits: false }), 70);
   });
 });
 
@@ -2308,6 +2311,130 @@ describe("shouldAutoCommit", () => {
       shouldAutoCommit(" M file1.go\n?? file2.go\nA  file3.go"),
       true,
     );
+  });
+});
+
+describe("shouldProduceCommits", () => {
+  // Mirrors `shouldUseWorktree` shape — declarative per-agent policy.
+  // The dispatcher's empty-branch guard uses this to decide whether
+  // a 0-ahead-of-main branch after the run is a silent failure
+  // (architect/developer/documentation) or expected (po/code-review).
+
+  test("PO does not produce commits (operates on issue body via gh)", () => {
+    const po = AGENTS.find(a => a.name === "po")!;
+    assert.equal(shouldProduceCommits(po), false);
+  });
+
+  test("architect produces commits (writes spec to docs/specs/architecture/)", () => {
+    const arch = AGENTS.find(a => a.name === "architect")!;
+    assert.equal(shouldProduceCommits(arch), true);
+  });
+
+  test("developer produces commits (writes Go code + tests)", () => {
+    const dev = AGENTS.find(a => a.name === "developer")!;
+    assert.equal(shouldProduceCommits(dev), true);
+  });
+
+  test("code-review does not produce commits (PR comments only)", () => {
+    // code-review uses a worktree (reads code locally) but never writes
+    // — its output is PR comments via `gh pr review`. A 0-ahead branch
+    // after code-review is the normal case, not a failure signal.
+    const cr = AGENTS.find(a => a.name === "code-review")!;
+    assert.equal(shouldProduceCommits(cr), false);
+  });
+
+  test("documentation produces commits (writes to docs/)", () => {
+    const docs = AGENTS.find(a => a.name === "documentation")!;
+    assert.equal(shouldProduceCommits(docs), true);
+  });
+
+  test("every AgentConfig declares producesCommits explicitly", () => {
+    // Same forcing-function shape as `usesWorktree`: adding a new agent
+    // forces an explicit decision about whether a 0-ahead branch after
+    // its run is a failure or normal. No implicit defaults.
+    for (const agent of AGENTS) {
+      assert.equal(
+        typeof agent.producesCommits,
+        "boolean",
+        `${agent.name} must declare producesCommits`,
+      );
+    }
+  });
+});
+
+describe("parseCommitsAhead", () => {
+  // Wraps `git rev-list --count <base>..<branch>` — emits a single
+  // integer line. The empty-branch guard uses this to decide whether
+  // an agent's run produced any commits.
+
+  test("zero commits ahead → 0", () => {
+    assert.equal(parseCommitsAhead("0\n"), 0);
+  });
+
+  test("non-zero commits ahead → N", () => {
+    assert.equal(parseCommitsAhead("5\n"), 5);
+    assert.equal(parseCommitsAhead("42\n"), 42);
+  });
+
+  test("trailing whitespace is tolerated", () => {
+    assert.equal(parseCommitsAhead("3"), 3);
+    assert.equal(parseCommitsAhead("  7  \n"), 7);
+  });
+
+  test("empty / non-numeric output → -1 sentinel (caller treats as unknown)", () => {
+    // The dispatcher's caller checks `>= 0` before flagging; -1 means
+    // "git output unparseable, don't act on it" — safer than treating
+    // garbage as 0 and falsely flagging the run as empty.
+    assert.equal(parseCommitsAhead(""), -1);
+    assert.equal(parseCommitsAhead("\n"), -1);
+    assert.equal(parseCommitsAhead("not a number"), -1);
+  });
+});
+
+describe("shouldFlagEmptyBranch", () => {
+  // True iff the agent was supposed to produce commits AND the branch
+  // is still 0 ahead of main after the run. Belt-and-suspenders against
+  // agents that exit cleanly without doing the work (relay #5: architect
+  // refused without spec, developer refused without spec, code-review
+  // FAILed silently because needs-rework labels didn't exist — board
+  // marched to Done with feature/5 unchanged from main).
+
+  test("PO + 0 commits → false (PO doesn't commit, expected)", () => {
+    const po = AGENTS.find(a => a.name === "po")!;
+    assert.equal(shouldFlagEmptyBranch(po, 0), false);
+  });
+
+  test("code-review + 0 commits → false (code-review doesn't commit, expected)", () => {
+    const cr = AGENTS.find(a => a.name === "code-review")!;
+    assert.equal(shouldFlagEmptyBranch(cr, 0), false);
+  });
+
+  test("architect + 0 commits → true (silent failure)", () => {
+    const arch = AGENTS.find(a => a.name === "architect")!;
+    assert.equal(shouldFlagEmptyBranch(arch, 0), true);
+  });
+
+  test("architect + 1+ commits → false (did the work)", () => {
+    const arch = AGENTS.find(a => a.name === "architect")!;
+    assert.equal(shouldFlagEmptyBranch(arch, 1), false);
+    assert.equal(shouldFlagEmptyBranch(arch, 17), false);
+  });
+
+  test("developer + 0 commits → true (silent failure)", () => {
+    const dev = AGENTS.find(a => a.name === "developer")!;
+    assert.equal(shouldFlagEmptyBranch(dev, 0), true);
+  });
+
+  test("documentation + 0 commits → true (silent failure)", () => {
+    const docs = AGENTS.find(a => a.name === "documentation")!;
+    assert.equal(shouldFlagEmptyBranch(docs, 0), true);
+  });
+
+  test("negative commits-ahead (parse failed) → false (don't act on garbage)", () => {
+    // -1 from `parseCommitsAhead` means "git output unparseable" — caller
+    // skips the flag rather than acting on a value it doesn't trust.
+    const arch = AGENTS.find(a => a.name === "architect")!;
+    assert.equal(shouldFlagEmptyBranch(arch, -1), false);
   });
 });
 

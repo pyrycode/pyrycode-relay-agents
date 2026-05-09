@@ -16,6 +16,9 @@ import {
   decideDoneCleanup,
   shouldAutoCommit,
   shouldUseWorktree,
+  shouldProduceCommits,
+  parseCommitsAhead,
+  shouldFlagEmptyBranch,
   hasOpenBlockers,
   shouldSkipBlockedFor,
   maxTurnsFor,
@@ -454,6 +457,15 @@ async function buildPromptForAgent(
  * the work and ran out of turns on PR-creation cleanup; this one
  * fires when the agent stopped mid-work but has buildable code.
  */
+// Salvage interaction note: this path runs ONLY on max_turns failure
+// (the success path is gated by `streamResult.isError === false`). The
+// post-push empty-branch guard further down only fires on `!saferSalvaged`,
+// so a successful salvage here bypasses it cleanly — the salvage path
+// is allowed to leave a 0-commit-ahead branch (it opened a draft PR
+// with whatever WIP existed and labeled `error:max_turns_salvaged`).
+// Keep this asymmetry in mind when editing salvage: if the salvage path
+// ever succeeds without producing commits AND clears `saferSalvaged`,
+// the empty-branch guard would falsely fire.
 async function attemptSaferSalvage(opts: {
   agentCwd: string;
   branchName: string;
@@ -1075,12 +1087,76 @@ async function dispatchToAgent(
       }
     }
 
+    // Empty-branch guard: agents that are supposed to produce commits
+    // (architect/developer/documentation) but exit cleanly with the
+    // branch still 0 ahead of `main` are silent failures. Treat as
+    // `error:<agent>` to force human triage instead of auto-advancing
+    // a no-op past `ready:<agent>`.
+    //
+    // Belt-and-suspenders against a class the agents themselves can't
+    // reliably catch: each agent in the relay #5 incident (2026-05-08)
+    // did the right thing prose-wise (refused to act without prerequisites,
+    // posted a meaningful comment), but the dispatcher had no
+    // deterministic check that the prose matched the branch state.
+    // The auto-commit safety net above catches "agent wrote files but
+    // forgot to commit"; this catches "agent didn't write anything."
+    //
+    // Skipped on saferSalvaged: salvage already labeled
+    // `error:max_turns_salvaged` and opened a draft PR with whatever
+    // commits exist. The `usesWorktree` gate excludes PO (no branch
+    // to count). The `shouldProduceCommits` predicate inside
+    // `shouldFlagEmptyBranch` excludes code-review (PR comments only).
+    if (item.issueNumber > 0 && useWorktree && !saferSalvaged && shouldProduceCommits(agent)) {
+      let commitsAhead = -1;
+      try {
+        const out = execSync(
+          `git rev-list --count main..${branchName}`,
+          { cwd: agentCwd, stdio: "pipe" },
+        ).toString();
+        commitsAhead = parseCommitsAhead(out);
+      } catch (e: any) {
+        // Don't act on git errors — `parseCommitsAhead` returns -1 for
+        // unparseable input, and `shouldFlagEmptyBranch` returns false
+        // on negative values, so the guard becomes a no-op when git
+        // can't tell us the answer. Surface the failure so operators
+        // see why the guard didn't fire on a possibly-empty branch.
+        const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
+        console.warn(`   ⚠️  Failed to count commits ahead of main (empty-branch guard skipped): ${detail.slice(0, 300)}`);
+      }
+      if (shouldFlagEmptyBranch(agent, commitsAhead)) {
+        console.error(`   ❌ ${agent.name} produced no commits — branch is 0 ahead of main. Treating as error:${agent.name}.`);
+        try {
+          await client.addLabel(item.issueNumber, `error:${agent.name}`);
+        } catch (e) {
+          console.warn(`   ⚠️  Failed to add error:${agent.name} label: ${e}`);
+        }
+        try {
+          await client.addComment(
+            item.issueNumber,
+            `## ⚠️ Dispatch Error: ${agent.name} produced no commits\n\n` +
+            `Branch \`${branchName}\` is 0 commits ahead of \`main\` after the run completed. ` +
+            `This agent (\`${agent.name}\`) is expected to produce commits during a normal run; an empty branch usually means the agent silently refused or pattern-matched its way out of the work without raising a structured signal.\n\n` +
+            `Likely causes:\n` +
+            `- Upstream prerequisite not visible to the agent (missing spec, blocker semantics, or repo-side label gap)\n` +
+            `- Agent posted comments instead of writing files (mechanical-contract violation)\n` +
+            `- Pre-existing branch state already contained the work (rare; check \`git log main..${branchName}\`)\n\n` +
+            `Treating as \`error:${agent.name}\`. To unblock: investigate the agent's run log, fix the underlying cause, then strip the \`error:${agent.name}\` label to retry — or route via \`needs-rework:<previous-agent>\` if the upstream needs to redo its handoff.`,
+          );
+        } catch (e) {
+          console.warn(`   ⚠️  Failed to post empty-branch error comment: ${e}`);
+        }
+        return;
+      }
+    }
+
     // Post-success labeling
     // Convention: agents add needs-rework:{target} directly (target = who should fix it).
     // The dispatch detects any needs-rework:* label and treats it as a rework signal.
     // Skipped when saferSalvaged: that path already set `error:max_turns_salvaged`
     // and posted its own comment; adding `ready:<agent>` here would auto-advance
     // partial work, which is exactly what the salvage path is designed to prevent.
+    // Also skipped by the empty-branch guard above (early `return`) when an agent
+    // that's supposed to commit produced nothing.
     if (item.issueNumber > 0 && !saferSalvaged) {
       // Gather state — labels + post-run column. Both can fail with API
       // errors; collect what we have and let `decidePostRunLabels` choose
