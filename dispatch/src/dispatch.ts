@@ -37,7 +37,8 @@ import { runAutoAdvance, runReworkRouting } from "./reconcile.js";
 
 // Load .env from agents repo root (where dispatch lives).
 // __dirname is agents/dispatch/src, so ../.. is agents/ root.
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const agentsRepoRoot = resolveAgentsRepoRoot(__dirname);
 
 // The target repo — where code lives and agents work.
@@ -145,7 +146,7 @@ function writeLog(logFile: string, section: string, content: string): void {
 // Each assistant message, tool call, and result is logged as it happens,
 // so agent runs are observable during execution (not just post-mortem).
 
-interface StreamResult {
+export interface StreamResult {
   output: string;
   sessionId: string;
   isError: boolean;
@@ -2005,28 +2006,41 @@ async function dispatchInbox(request: string): Promise<void> {
   console.log(`   or: gh project item-edit --id ${itemId} --project-id <id> --field-id <Status field id> --single-select-option-id <Backlog option id>`);
 }
 
-// Entry point
-const args = process.argv.slice(2);
+// Entry point — gated on "this file is the program's main module" so
+// `import` from a test file (or any other consumer) doesn't kick off
+// `pollLoop()`. Without this gate, `tsx --test src/*.test.ts` imports
+// dispatch.ts, falls through to the `else` branch below, and starts
+// polling the live GitHub Project — the test process becomes a real
+// dispatcher running against production state. Surfaced 2026-05-09
+// when the first test import accidentally re-attempted the auto-merge
+// of PR #236 against pyrycode/pyrycode.
+// argv[1] may be relative (e.g. `tsx src/dispatch.ts`); resolve before
+// comparing against the absolute __filename.
+const __isMain = !!process.argv[1] && resolve(process.argv[1]) === __filename;
 
-if (args[0] === "inbox" && args[1]) {
-  dispatchInbox(args.slice(1).join(" ")).catch((e) => {
-    console.error("Fatal error in inbox dispatch:", e);
-    process.exit(1);
-  });
-} else if (args[0] === "po" && args[1]) {
-  // Backwards-compat shim: old `pnpm start po "..."` now delegates to
-  // dispatchInbox with a deprecation notice. PO no longer runs on raw
-  // requests — it only refines triaged Backlog tickets.
-  console.warn("⚠️  `pnpm start po` is deprecated. Use `pnpm start inbox` instead.");
-  console.warn("    PO no longer creates tickets from raw requests; tickets land in Inbox");
-  console.warn("    and are promoted to Backlog manually when ready for PO to refine.\n");
-  dispatchInbox(args.slice(1).join(" ")).catch((e) => {
-    console.error("Fatal error in inbox dispatch:", e);
-    process.exit(1);
-  });
-} else {
-  pollLoop().catch((e) => {
-    console.error("Fatal error in poll loop:", e);
-    process.exit(1);
-  });
+if (__isMain) {
+  const args = process.argv.slice(2);
+
+  if (args[0] === "inbox" && args[1]) {
+    dispatchInbox(args.slice(1).join(" ")).catch((e) => {
+      console.error("Fatal error in inbox dispatch:", e);
+      process.exit(1);
+    });
+  } else if (args[0] === "po" && args[1]) {
+    // Backwards-compat shim: old `pnpm start po "..."` now delegates to
+    // dispatchInbox with a deprecation notice. PO no longer runs on raw
+    // requests — it only refines triaged Backlog tickets.
+    console.warn("⚠️  `pnpm start po` is deprecated. Use `pnpm start inbox` instead.");
+    console.warn("    PO no longer creates tickets from raw requests; tickets land in Inbox");
+    console.warn("    and are promoted to Backlog manually when ready for PO to refine.\n");
+    dispatchInbox(args.slice(1).join(" ")).catch((e) => {
+      console.error("Fatal error in inbox dispatch:", e);
+      process.exit(1);
+    });
+  } else {
+    pollLoop().catch((e) => {
+      console.error("Fatal error in poll loop:", e);
+      process.exit(1);
+    });
+  }
 }
