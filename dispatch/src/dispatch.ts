@@ -618,25 +618,61 @@ async function attemptSaferSalvage(opts: {
   }
 }
 
+// Per-dispatch state, computed once at the start of dispatchToAgent and
+// threaded through every phase function. Module-level constants
+// (repoRoot, agentsRepoRoot, __dirname, LOGS_DIR) stay as closures —
+// they don't vary per dispatch and threading them through would just
+// add noise.
+type DispatchContext = {
+  agent: AgentConfig;
+  item: ProjectItem;
+  client: GitHubProjectClient;
+  branchName: string;
+  worktreeDir: string;
+  useWorktree: boolean;
+  agentCwd: string;
+  logFile: string;
+  startTime: number;
+  startTs: string;
+};
+
+function makeDispatchContext(
+  agent: AgentConfig,
+  item: ProjectItem,
+  client: GitHubProjectClient,
+): DispatchContext {
+  const branchName = `feature/${item.issueNumber}`;
+  // Main repo NEVER checks out the feature branch — avoids orphaned untracked
+  // files when switching back to main. All feature branch work happens in the
+  // worktree. PO never needs a worktree — it uses gh CLI, no code changes.
+  const worktreeDir = resolve(repoRoot, `../.pyrycode-worktrees/${agent.name}-${item.issueNumber}`);
+  const useWorktree = item.issueNumber > 0 && shouldUseWorktree(agent);
+  const agentCwd = useWorktree ? worktreeDir : repoRoot;
+  return {
+    agent,
+    item,
+    client,
+    branchName,
+    worktreeDir,
+    useWorktree,
+    agentCwd,
+    logFile: agentLogPath(agent.name, item.issueNumber),
+    startTime: Date.now(),
+    startTs: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+  };
+}
+
 async function dispatchToAgent(
   agent: AgentConfig,
   item: ProjectItem,
   client: GitHubProjectClient,
 ): Promise<void> {
-  const startTime = Date.now();
-  const startTs = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const ctx = makeDispatchContext(agent, item, client);
+  const { branchName, worktreeDir, useWorktree, agentCwd, startTime, startTs } = ctx;
   console.log(`\n[${startTs}] 🚀 Dispatching #${item.issueNumber} to ${agent.name}`);
   console.log(`   Title: ${item.title}`);
 
-  const branchName = `feature/${item.issueNumber}`;
-
   // --- Branch + worktree setup ---
-  // Main repo NEVER checks out the feature branch — avoids orphaned untracked files
-  // when switching back to main. All feature branch work happens in the worktree.
-  const worktreeDir = resolve(repoRoot, `../.pyrycode-worktrees/${agent.name}-${item.issueNumber}`);
-  // PO never needs a worktree — it uses gh CLI, no code changes
-  const useWorktree = item.issueNumber > 0 && shouldUseWorktree(agent);
-  const agentCwd = useWorktree ? worktreeDir : repoRoot;
 
   // PO and issue-0 (manual dispatch) run on main — just pull latest
   if (!useWorktree) {
@@ -917,7 +953,7 @@ async function dispatchToAgent(
   let allowedTools = baseTools;
   if (needsAgent) allowedTools += ",Agent";
 
-  const logFile = agentLogPath(agent.name, item.issueNumber);
+  const { logFile } = ctx;
   // Timeout tiers: code-review 40min (sub-agents), developer/docs 25min, light agents 20min
   const isMediumAgent = ["developer", "documentation"].includes(agent.name);
   const timeoutMs = isCodeReview ? 2_400_000 : isMediumAgent ? 1_500_000 : 1_200_000;
