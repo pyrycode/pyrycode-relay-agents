@@ -2489,3 +2489,147 @@ describe("runConcurrentDispatches", () => {
     assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1104 && c.label === "wip:developer"));
   });
 });
+
+// =====================================================================
+// runAutoMerge
+// =====================================================================
+//
+// 4 tests for the Done-column auto-merge driver. Skip cases (the 4
+// guards: merged label, error:merge-conflict label, issueNumber<=0,
+// empty PR list) collapse into one parametric test; happy path,
+// conflict path, and transient-gh-failure each get their own.
+
+describe("runAutoMerge", () => {
+  test("happy path → gh pr merge succeeds, labels stripped, git pull, Discord notified", async () => {
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 1200, status: "Done", labels: ["ready:documentation", "size:s"], state: "OPEN" },
+      ],
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        // gh pr list returns the PR number on stdout (raw int).
+        "gh pr list --head \"feature/1200\"": () => "789\n",
+        // gh pr merge succeeds (empty output).
+        "gh pr merge 789 --merge --delete-branch": () => "",
+        // Post-merge git pull succeeds.
+        "git checkout main && git pull": () => "",
+      },
+    });
+
+    await runAutoMerge(client, deps);
+
+    // gh pr merge invoked with the right PR number.
+    assert.ok(calls.exec.some(c => c.cmd === "gh pr merge 789 --merge --delete-branch"),
+      "must invoke `gh pr merge 789 --merge --delete-branch`");
+    // Post-merge pull happened.
+    assert.ok(calls.exec.some(c => c.cmd === "git checkout main && git pull"));
+    // Pipeline label stripped (ready:documentation is a pipeline label).
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1200 && c.label === "ready:documentation"));
+    // Non-pipeline label (size:s) NOT stripped.
+    assert.ok(!client.removeLabelCalls.some(c => c.label === "size:s"));
+    // Discord notify (one 🔀 message for the merge).
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^🔀 PR #789 merged for #1200/);
+    // No error:merge-conflict label applied (this is a clean merge).
+    assert.ok(!client.addLabelCalls.some(c => c.label === "error:merge-conflict"));
+  });
+
+  test("merge conflict → error:merge-conflict label + triage comment + Discord notify (no retry-loop)", async () => {
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 1201, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
+      ],
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "gh pr list --head \"feature/1201\"": () => "790\n",
+        // gh pr merge throws with the canonical "not mergeable" stderr —
+        // isMergeConflictError matches this verbatim.
+        "gh pr merge 790 --merge --delete-branch": () => execError({
+          stderr: "X Pull request #790 is not mergeable: the merge commit cannot be cleanly created.",
+          message: "Command failed: gh pr merge 790",
+        }),
+      },
+    });
+
+    await runAutoMerge(client, deps);
+
+    // The conflict-block label was applied (stops retry loop on next cycle).
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1201 && c.label === "error:merge-conflict"));
+    // Triage comment posted with manual-resolution recipe.
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /Auto-merge blocked by merge conflict/);
+    assert.match(client.comments[0]!.body, /gh pr checkout 790/);
+    assert.match(client.comments[0]!.body, /git fetch origin main/);
+    // Discord notify (one 🛑 message).
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^🛑 Merge conflict on PR #790/);
+    // Pipeline labels NOT stripped (the merge failed, so the ticket
+    // isn't really done; labels stay until human resolves).
+    assert.ok(!client.removeLabelCalls.some(c => c.issueNumber === 1201));
+  });
+
+  test("skip cases — merged label, error:merge-conflict label, issueNumber=0 → no gh pr list invoked", async () => {
+    // Three skip-cases plus one normal item that DOES go through the
+    // gh-pr-list step (so we can confirm the skip is selective, not
+    // absolute). Fourth item has no PR (empty stdout) → continues
+    // without merge.
+    const client = new MockGitHubClient({
+      items: [
+        { id: "PVTI_1202", issueNumber: 1202, status: "Done", labels: ["merged", "size:s"], state: "OPEN" },                     // skip: merged
+        { id: "PVTI_1203", issueNumber: 1203, status: "Done", labels: ["error:merge-conflict"], state: "OPEN" },                  // skip: conflicted
+        { id: "PVTI_1204", issueNumber: 0,    status: "Done", labels: [], state: "OPEN" },                                        // skip: issue-0 (epic)
+        { id: "PVTI_1205", issueNumber: 1205, status: "Done", labels: ["ready:documentation"], state: "OPEN" },                  // would process if it had a PR
+      ],
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        // Item 1205's PR list returns empty (no open PR) → skip without merging.
+        "gh pr list --head \"feature/1205\"": () => "",
+      },
+    });
+
+    await runAutoMerge(client, deps);
+
+    // No gh pr list calls were made for the three skip-case items.
+    const ghListCalls = calls.exec.filter(c => c.cmd.includes("gh pr list"));
+    assert.equal(ghListCalls.length, 1, "exactly one gh pr list (for 1205); skip-cases bypass the call entirely");
+    assert.ok(ghListCalls[0]!.cmd.includes("feature/1205"));
+    // No merges happened at all (1205's PR list was empty; others skipped).
+    assert.ok(!calls.exec.some(c => c.cmd.includes("gh pr merge")));
+    // No labels added or stripped.
+    assert.equal(client.addLabelCalls.length, 0);
+    assert.equal(client.removeLabelCalls.length, 0);
+  });
+
+  test("transient gh pr list failure → skip silently, retry next cycle (no error label)", async () => {
+    // Network/auth/rate-limit failures on the PR-existence lookup are
+    // transient. The dispatcher must skip the merge for this cycle and
+    // try again next cycle — applying error:<agent> here would
+    // permanently block legitimate PRs.
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 1206, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
+      ],
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "gh pr list --head \"feature/1206\"": () => execError({
+          stderr: "GraphQL error: rate limit exceeded",
+          message: "Command failed: gh pr list",
+        }),
+      },
+    });
+
+    await runAutoMerge(client, deps);
+
+    // No merge attempt.
+    assert.ok(!calls.exec.some(c => c.cmd.includes("gh pr merge")));
+    // No error label applied — the failure is transient.
+    assert.ok(!client.addLabelCalls.some(c => c.label.startsWith("error:")));
+    // No comment, no Discord notify.
+    assert.equal(client.comments.length, 0);
+    assert.equal(calls.discord.length, 0);
+  });
+});
