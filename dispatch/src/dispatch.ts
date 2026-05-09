@@ -662,14 +662,20 @@ function makeDispatchContext(
   };
 }
 
+// Orchestrator: each phase function below owns its slice of state and
+// side effects. `setupBranchAndWorktree` and `prepareAgentSpawn`
+// returning `{ ok: false }` are early-aborts that DELIBERATELY skip
+// `cleanupAfterDispatch` (preserves the worktree as evidence for
+// human triage; today's behavior). Same for `handlePostRun` returning
+// `{ ok: false }` from inside the try block — push-failure and
+// empty-branch-guard preserve the worktree on purpose.
 async function dispatchToAgent(
   agent: AgentConfig,
   item: ProjectItem,
   client: GitHubProjectClient,
 ): Promise<void> {
   const ctx = makeDispatchContext(agent, item, client);
-  const { branchName, worktreeDir, useWorktree, agentCwd, startTime, startTs } = ctx;
-  console.log(`\n[${startTs}] 🚀 Dispatching #${item.issueNumber} to ${agent.name}`);
+  console.log(`\n[${ctx.startTs}] 🚀 Dispatching #${item.issueNumber} to ${agent.name}`);
   console.log(`   Title: ${item.title}`);
 
   const setup = await setupBranchAndWorktree(ctx);
@@ -678,20 +684,15 @@ async function dispatchToAgent(
   const spawn = await prepareAgentSpawn(ctx);
   if (!spawn.ok) return;
 
-  // Stream result is stored outside try so the catch handler can access session_id
+  // streamResult is declared outside the try so handleDispatchError
+  // can read its sessionId for the JSONL-replay resume hint.
   let streamResult: StreamResult | null = null;
-  // True after `attemptSaferSalvage` completed successfully — the
-  // ticket got `error:max_turns_salvaged` + a draft PR. Gates the
-  // success-path labeling so we don't ALSO add `ready:<agent>`
-  // (which would auto-advance partial work to code-review).
   let saferSalvaged = false;
   try {
     streamResult = await runClaudeStreaming(spawn.config);
     saferSalvaged = await handleAgentResultErrors(streamResult, ctx);
-
     const postRun = await handlePostRun(streamResult, ctx, saferSalvaged);
     if (!postRun.ok) return;
-
   } catch (error: any) {
     await handleDispatchError(error, ctx, streamResult);
   }
