@@ -106,11 +106,15 @@ export type MockDepsOptions = {
    */
   spawnImpls?: Record<string, SpawnHandler>;
   /**
-   * Result `runClaudeStreaming` returns. Either a fixed value or a
-   * function (called per invocation, so successive streams can differ).
+   * Result `runClaudeStreaming` returns. Three forms:
+   *   - Fixed `StreamResult` — every invocation returns the same value.
+   *   - `() => StreamResult` — called per invocation, no args.
+   *   - `(opts) => StreamResult` — called per invocation with the
+   *     SpawnConfig (so concurrent-dispatch tests can branch on
+   *     `opts.cwd` to differentiate which dispatch is asking).
    * Defaults to a clean success result.
    */
-  streamResult?: StreamResult | (() => StreamResult);
+  streamResult?: StreamResult | ((opts?: any) => StreamResult);
   /**
    * Filesystem fixture. `existsSync(path)` returns true iff path is a
    * key. `readFileSync(path)` returns the value. `writeFileSync` /
@@ -212,9 +216,12 @@ export function makeMockDeps(opts: MockDepsOptions = {}): { deps: DispatchDeps; 
     rawResult: {},
   };
   const streamResolver = opts.streamResult ?? defaultStream;
-  const mockRunClaudeStreaming = (async (..._args: any[]) => {
+  const mockRunClaudeStreaming = (async (...args: any[]) => {
     calls.claudeStreams += 1;
-    return typeof streamResolver === "function" ? streamResolver() : streamResolver;
+    // Pass the SpawnConfig (first arg) to function resolvers so
+    // concurrent tests can branch on opts.cwd to differentiate
+    // which dispatch is asking. No-arg resolvers stay backward-compatible.
+    return typeof streamResolver === "function" ? streamResolver(args[0]) : streamResolver;
   }) as unknown as DispatchDeps["runClaudeStreaming"];
 
   const mockNotifyDiscord = async (msg: string): Promise<void> => {
@@ -1782,5 +1789,240 @@ describe("dispatchToAgent — orchestrator integration", () => {
       !cleanupRan(calls.exec),
       "prepareAgentSpawn early-return must skip cleanupAfterDispatch (inline cleanup is the path here)",
     );
+  });
+});
+
+// =====================================================================
+// dispatchToAgent — concurrent dispatches
+// =====================================================================
+//
+// 4 tests covering the `pollLoop`'s real concurrency model:
+// `Promise.allSettled(candidates.map(({ agent, item }) =>
+// dispatchToAgent(agent, item, client)))`. Two simultaneous
+// dispatchToAgent calls share the same `GitHubProjectClient`, the same
+// fs/child_process surface, and the same module-level state. These
+// tests verify the dispatcher's per-dispatch isolation invariants
+// hold under that sharing:
+//
+// 1. Worktree paths derived from agent+ticket are distinct → no
+//    git worktree add collision.
+// 2. Per-issue label state stays scoped — addLabel(100, ...) and
+//    addLabel(200, ...) don't interfere.
+// 3. One dispatch's failure path doesn't leak into the other's
+//    success path (cleanup-skip is per-dispatch, not per-process).
+// 4. Promise.allSettled isolation — one dispatch's exception doesn't
+//    prevent the other from completing.
+//
+// JS is single-threaded so there's no true parallelism, but `await`
+// boundaries create interleavings — these tests catch shared-state
+// bugs that depend on call ordering across awaits.
+
+describe("dispatchToAgent — concurrent dispatches (pollLoop's Promise.allSettled model)", () => {
+  test("two concurrent happy-path dispatches → both succeed cleanly with per-issue label state", async () => {
+    // Shared client + shared deps, two distinct tickets. This is the
+    // exact shape pollLoop uses: one client and one process-level deps
+    // surface, multiple concurrent dispatches.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 800: "In Development", 801: "In Development" },
+      labels: { 800: [], 801: [] },
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        // Branch-existence checks for both tickets.
+        "git rev-parse --verify feature/800": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/800": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/801": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/801": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+    const agent = makeAgentConfig({});
+
+    const results = await Promise.allSettled([
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 800 }), client, deps),
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 801 }), client, deps),
+    ]);
+
+    // Both promises completed successfully (no thrown errors).
+    assert.equal(results[0]!.status, "fulfilled", `dispatch 1: ${results[0]!.status}`);
+    assert.equal(results[1]!.status, "fulfilled", `dispatch 2: ${results[1]!.status}`);
+
+    // Per-issue label state: each ticket got its own ready label, no cross-pollination.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 800 && c.label === "ready:developer"));
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 801 && c.label === "ready:developer"));
+    // No error labels on either.
+    assert.ok(!client.addLabelCalls.some(c => c.label.startsWith("error:")));
+
+    // Both worktree dirs were referenced — and they're distinct paths
+    // (one ends in `developer-800`, the other `developer-801`).
+    const worktreeAddCalls = calls.exec.filter(c => c.cmd.includes("git worktree add"));
+    assert.equal(worktreeAddCalls.length, 2, "exactly two worktree add calls (one per dispatch)");
+    assert.ok(worktreeAddCalls.some(c => c.cmd.includes("developer-800")));
+    assert.ok(worktreeAddCalls.some(c => c.cmd.includes("developer-801")));
+
+    // Stream invoked twice (once per dispatch).
+    assert.equal(calls.claudeStreams, 2);
+    // Discord notify fired twice (success per dispatch).
+    assert.equal(calls.discord.length, 2);
+  });
+
+  test("one push-fail + one happy in parallel → no cross-contamination of labels or cleanup", async () => {
+    // The cleanup-skip-on-failure invariant must be PER-DISPATCH, not
+    // per-process. Ticket #802 push fails (worktree preserved as
+    // evidence), ticket #803 succeeds (worktree cleaned up). Both
+    // outcomes must be visible in the shared client + shared call log
+    // without one ticket's signal contaminating the other.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 802: "In Development", 803: "In Development" },
+      labels: { 802: [], 803: [] },
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/802": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/802": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/803": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/803": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        // Ticket 802's push fails; 803's push succeeds (default empty exec impl).
+        "git push -u origin feature/802": () => execError({ stderr: "non-fast-forward" }),
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+    const agent = makeAgentConfig({});
+
+    await Promise.allSettled([
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 802 }), client, deps),
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 803 }), client, deps),
+    ]);
+
+    // Per-issue label scope holds:
+    // 802 got error:developer (push failed); NO ready:developer.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 802 && c.label === "error:developer"));
+    assert.ok(!client.addLabelCalls.some(c => c.issueNumber === 802 && c.label === "ready:developer"));
+    // 803 got ready:developer (happy path); NO error:developer.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 803 && c.label === "ready:developer"));
+    assert.ok(!client.addLabelCalls.some(c => c.issueNumber === 803 && c.label === "error:developer"));
+
+    // Cleanup-skip is per-dispatch: 803's worktree was cleaned up
+    // (cleanup ran), 802's was preserved. The orchestrator's cleanup
+    // marker is `git checkout -- .` — it should appear at least once
+    // (for 803), not twice. (Each dispatchToAgent that runs cleanup
+    // emits this exactly once.)
+    const cleanupMarkerCount = calls.exec.filter(c => c.cmd === "git checkout -- .").length;
+    assert.equal(cleanupMarkerCount, 1, "cleanup must run for the success but not the failure (per-dispatch isolation)");
+  });
+
+  test("two concurrent failures (different non-max_turns errors) → both isolated, both run handleDispatchError + cleanup", async () => {
+    // Both dispatches' streams return is-error with different terminal
+    // reasons. Each independently goes through handleAgentResultErrors
+    // (which throws because non-max_turns) → outer catch →
+    // handleDispatchError → cleanupAfterDispatch.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 804: "In Development", 805: "In Development" },
+      labels: { 804: [], 805: [] },
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/804": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/804": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/805": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/805": () => execError({ stderr: "fatal" }),
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+      // Per-dispatch stream resolution via opts.cwd: 804 returns
+      // api_error, 805 returns timeout. Both should hit the
+      // non-max_turns throw path independently.
+      streamResult: (opts) => {
+        if (opts?.cwd?.includes("developer-804")) {
+          return streamResult({ isError: true, terminalReason: "api_error", output: "Anthropic 529" });
+        }
+        return streamResult({ isError: true, terminalReason: "timeout", output: "agent killed after 25min" });
+      },
+    });
+    const agent = makeAgentConfig({});
+
+    const results = await Promise.allSettled([
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 804 }), client, deps),
+      dispatchToAgent(agent, makeProjectItem({ issueNumber: 805 }), client, deps),
+    ]);
+
+    // Both promises completed (didn't throw out of dispatchToAgent —
+    // outer catch handled the throw, then cleanup ran). This is the
+    // load-bearing isolation guarantee for `Promise.allSettled` in
+    // pollLoop.
+    assert.equal(results[0]!.status, "fulfilled");
+    assert.equal(results[1]!.status, "fulfilled");
+
+    // Both got error:developer.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 804 && c.label === "error:developer"));
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 805 && c.label === "error:developer"));
+
+    // Cleanup ran for BOTH (thrown errors get clean teardown).
+    const cleanupMarkerCount = calls.exec.filter(c => c.cmd === "git checkout -- .").length;
+    assert.equal(cleanupMarkerCount, 2, "thrown-error path runs cleanup; both dispatches must emit the marker");
+
+    // Two error Discord notifies (one per failure).
+    assert.equal(calls.discord.length, 2);
+    assert.ok(calls.discord.every(d => /^❌/.test(d)));
+  });
+
+  test("different agents on different tickets → distinct worktree paths + correct per-agent labels", async () => {
+    // architect on #806, developer on #807. Different agents on
+    // different tickets — the `<agent>-<n>` worktree path naming
+    // scheme means no path collision is possible. Verify both
+    // dispatches succeed AND their labels are scoped to the right
+    // agent name (ready:architect on 806, ready:developer on 807).
+    const archMd = claudeMdAbsPath("architect/CLAUDE.md");
+    const devMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 806: "In Architecture", 807: "In Development" },
+      labels: { 806: [], 807: [] },
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/806": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/806": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/807": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/807": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [archMd]: "architect system prompt", [devMd]: "developer system prompt" },
+    });
+
+    const archAgent = makeAgentConfig({ name: "architect", column: "In Architecture", claudeMdPath: "architect/CLAUDE.md" });
+    const devAgent = makeAgentConfig({});
+
+    const results = await Promise.allSettled([
+      dispatchToAgent(archAgent, makeProjectItem({ issueNumber: 806 }), client, deps),
+      dispatchToAgent(devAgent, makeProjectItem({ issueNumber: 807 }), client, deps),
+    ]);
+
+    assert.equal(results[0]!.status, "fulfilled");
+    assert.equal(results[1]!.status, "fulfilled");
+
+    // Per-agent label scoping: each ticket got the correct
+    // ready:<agent> prefix matching the dispatching agent's name.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 806 && c.label === "ready:architect"));
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 807 && c.label === "ready:developer"));
+    // No cross-pollination: 806 didn't get ready:developer, 807 didn't get ready:architect.
+    assert.ok(!client.addLabelCalls.some(c => c.issueNumber === 806 && c.label === "ready:developer"));
+    assert.ok(!client.addLabelCalls.some(c => c.issueNumber === 807 && c.label === "ready:architect"));
+
+    // Worktree paths: `architect-806` and `developer-807` — distinct
+    // by agent name AND ticket number, doubly safe.
+    const worktreeAdds = calls.exec.filter(c => c.cmd.includes("git worktree add"));
+    assert.equal(worktreeAdds.length, 2);
+    assert.ok(worktreeAdds.some(c => c.cmd.includes("architect-806")));
+    assert.ok(worktreeAdds.some(c => c.cmd.includes("developer-807")));
+    // Sanity: NO crossed paths (architect-807 or developer-806).
+    assert.ok(!worktreeAdds.some(c => c.cmd.includes("architect-807")));
+    assert.ok(!worktreeAdds.some(c => c.cmd.includes("developer-806")));
   });
 });
