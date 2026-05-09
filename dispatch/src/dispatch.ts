@@ -894,7 +894,6 @@ async function dispatchToAgent(
 
   const spawn = await prepareAgentSpawn(ctx);
   if (!spawn.ok) return;
-  const { logFile } = ctx;
 
   // Stream result is stored outside try so the catch handler can access session_id
   let streamResult: StreamResult | null = null;
@@ -907,241 +906,8 @@ async function dispatchToAgent(
     streamResult = await runClaudeStreaming(spawn.config);
     saferSalvaged = await handleAgentResultErrors(streamResult, ctx);
 
-    const output = streamResult.output;
-    const u = streamResult.usage;
-    const usageSummary = [
-      `Turns: ${streamResult.numTurns}`,
-      `Duration: ${Math.round(streamResult.durationMs / 1000)}s`,
-      `Input tokens: ${(u as any).input_tokens ?? 0}`,
-      `Output tokens: ${(u as any).output_tokens ?? 0}`,
-      `Cache read: ${(u as any).cache_read_input_tokens ?? 0}`,
-      `Cache creation: ${(u as any).cache_creation_input_tokens ?? 0}`,
-      `Cost: $${streamResult.totalCostUsd.toFixed(4)}`,
-      `Session: ${streamResult.sessionId}`,
-    ].join(" | ");
-
-    writeLog(logFile, "OUTPUT (success)", output);
-    writeLog(logFile, "USAGE", usageSummary);
-    console.log(`   📊 ${usageSummary}`);
-
-    const endTs = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    const elapsedMin = Math.round((Date.now() - startTime) / 60_000);
-    // On the salvage path, attemptSaferSalvage already printed its own
-    // "💾 Safer salvage: draft PR opened..." line; printing "✅ completed"
-    // here would be misleading (the agent did NOT complete — work was
-    // salvaged mid-run). Output dump still useful for debugging either way.
-    if (!saferSalvaged) {
-      console.log(`   [${endTs}] ✅ ${agent.name} completed (${elapsedMin}min)`);
-    } else {
-      console.log(`   [${endTs}] 💾 ${agent.name} salvaged after ${elapsedMin}min`);
-    }
-    console.log(`   Output (last 1000 chars):\n${output.slice(-1000)}`);
-
-    // Safety net: commit any uncommitted changes BEFORE worktree cleanup
-    // destroys them. Surfaced on #27 (architect's spec was Written but not
-    // committed; `git worktree remove --force` destroyed it silently). Each
-    // agent's CLAUDE.md should already commit its work, but this catches the
-    // case where an agent forgets — which has happened, and the failure mode
-    // is silent loss of the run's output. Run unconditionally inside the
-    // worktree so we don't have to know which agents write files.
-    if (item.issueNumber > 0 && useWorktree) {
-      try {
-        const dirty = execSync(`git status --porcelain`, { cwd: agentCwd, stdio: "pipe" }).toString();
-        if (shouldAutoCommit(dirty)) {
-          execSync(`git add -A`, { cwd: agentCwd, stdio: "pipe" });
-          // argv-based commit so agent.name (currently from a hardcoded
-          // enum, but configurability is a routine refactor away) can't
-          // ever break out of `-m`'s quoting. Same discipline used in
-          // attemptSaferSalvage's commit + push above.
-          const cm = spawnSync(
-            "git",
-            [
-              "commit",
-              "-m", `${agent.name}: auto-commit uncommitted changes for #${item.issueNumber}`,
-            ],
-            { cwd: agentCwd, stdio: "pipe", timeout: 15_000 },
-          );
-          if (cm.status !== 0) {
-            throw new Error(`git commit failed: ${cm.stderr?.toString() || cm.stdout?.toString() || "unknown"}`);
-          }
-          console.log(`   💾 Auto-committed uncommitted changes (agent forgot to commit)`);
-        }
-      } catch (e) {
-        console.warn(`   ⚠️  Failed safety-net commit: ${e}`);
-      }
-    }
-
-    // Push the feature branch from the worktree. Only agents that use a
-    // worktree produce commits worth pushing; gating on useWorktree avoids
-    // the cosmetic "src refspec doesn't match any" failure for PO runs
-    // (PO doesn't write code, has no worktree, has no branch to push).
-    //
-    // **Push success is a precondition for treating the agent's verdict as
-    // canonical.** If push fails (typically non-fast-forward — the worktree
-    // is stale relative to origin, often because someone pushed out-of-band
-    // during the run), the agent's commits never reached origin. Downstream
-    // agents would work against pre-run main; code review would judge stale
-    // code. Treat as `error:<agent>`, skip ready-labeling, and bail — human
-    // strips the error label after deciding to retry or salvage. Surfaced
-    // 2026-05-07 when code-review on #155 ran on a stale worktree, FAILed,
-    // tried to push its review comments, hit non-fast-forward, but the
-    // dispatcher continued to apply ready:code-review and auto-advance.
-    if (item.issueNumber > 0 && useWorktree) {
-      try {
-        execSync(`git push -u origin ${branchName}`, { cwd: agentCwd, stdio: "pipe" });
-        console.log(`   📤 Pushed ${branchName} to origin`);
-      } catch (e: any) {
-        const stderr = e?.stderr?.toString?.() ?? "";
-        const stdout = e?.stdout?.toString?.() ?? "";
-        const detail = [stderr, stdout].filter(Boolean).join("\n").trim() || (e?.message ?? String(e));
-        console.error(`   ❌ Failed to push ${branchName} — agent's commits never reached origin. Treating as error:${agent.name}.`);
-        console.error(`      ${detail.replace(/\n/g, "\n      ")}`);
-        try {
-          await client.addLabel(item.issueNumber, `error:${agent.name}`);
-        } catch {}
-        try {
-          await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\n\`git push -u origin ${branchName}\` failed — the agent's commits never reached origin. Common cause: out-of-band push to \`${branchName}\` advanced the remote past this worktree's HEAD (non-fast-forward).\n\nTreating as \`error:${agent.name}\`. To retry: investigate the worktree state, rebase if appropriate, then strip the \`error:${agent.name}\` label.\n\n\`\`\`\n${detail}\n\`\`\``);
-        } catch {}
-        return;
-      }
-    }
-
-    // Empty-branch guard: agents that are supposed to produce commits
-    // (architect/developer/documentation) but exit cleanly with the
-    // branch still 0 ahead of `main` are silent failures. Treat as
-    // `error:<agent>` to force human triage instead of auto-advancing
-    // a no-op past `ready:<agent>`.
-    //
-    // Belt-and-suspenders against a class the agents themselves can't
-    // reliably catch: each agent in the relay #5 incident (2026-05-08)
-    // did the right thing prose-wise (refused to act without prerequisites,
-    // posted a meaningful comment), but the dispatcher had no
-    // deterministic check that the prose matched the branch state.
-    // The auto-commit safety net above catches "agent wrote files but
-    // forgot to commit"; this catches "agent didn't write anything."
-    //
-    // Skipped on saferSalvaged: salvage already labeled
-    // `error:max_turns_salvaged` and opened a draft PR with whatever
-    // commits exist. The `usesWorktree` gate excludes PO (no branch
-    // to count). The `shouldProduceCommits` predicate inside
-    // `shouldFlagEmptyBranch` excludes code-review (PR comments only).
-    if (item.issueNumber > 0 && useWorktree && !saferSalvaged && shouldProduceCommits(agent)) {
-      let commitsAhead = -1;
-      try {
-        const out = execSync(
-          `git rev-list --count main..${branchName}`,
-          { cwd: agentCwd, stdio: "pipe" },
-        ).toString();
-        commitsAhead = parseCommitsAhead(out);
-      } catch (e: any) {
-        // Don't act on git errors — `parseCommitsAhead` returns -1 for
-        // unparseable input, and `shouldFlagEmptyBranch` returns false
-        // on negative values, so the guard becomes a no-op when git
-        // can't tell us the answer. Surface the failure so operators
-        // see why the guard didn't fire on a possibly-empty branch.
-        const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
-        console.warn(`   ⚠️  Failed to count commits ahead of main (empty-branch guard skipped): ${detail.slice(0, 300)}`);
-      }
-      if (shouldFlagEmptyBranch(agent, commitsAhead)) {
-        console.error(`   ❌ ${agent.name} produced no commits — branch is 0 ahead of main. Treating as error:${agent.name}.`);
-        try {
-          await client.addLabel(item.issueNumber, `error:${agent.name}`);
-        } catch (e) {
-          console.warn(`   ⚠️  Failed to add error:${agent.name} label: ${e}`);
-        }
-        try {
-          await client.addComment(
-            item.issueNumber,
-            `## ⚠️ Dispatch Error: ${agent.name} produced no commits\n\n` +
-            `Branch \`${branchName}\` is 0 commits ahead of \`main\` after the run completed. ` +
-            `This agent (\`${agent.name}\`) is expected to produce commits during a normal run; an empty branch usually means the agent silently refused or pattern-matched its way out of the work without raising a structured signal.\n\n` +
-            `Likely causes:\n` +
-            `- Upstream prerequisite not visible to the agent (missing spec, blocker semantics, or repo-side label gap)\n` +
-            `- Agent posted comments instead of writing files (mechanical-contract violation)\n` +
-            `- Pre-existing branch state already contained the work (rare; check \`git log main..${branchName}\`)\n\n` +
-            `Treating as \`error:${agent.name}\`. To unblock: investigate the agent's run log, fix the underlying cause, then strip the \`error:${agent.name}\` label to retry — or route via \`needs-rework:<previous-agent>\` if the upstream needs to redo its handoff.`,
-          );
-        } catch (e) {
-          console.warn(`   ⚠️  Failed to post empty-branch error comment: ${e}`);
-        }
-        return;
-      }
-    }
-
-    // Post-success labeling
-    // Convention: agents add needs-rework:{target} directly (target = who should fix it).
-    // The dispatch detects any needs-rework:* label and treats it as a rework signal.
-    // Skipped when saferSalvaged: that path already set `error:max_turns_salvaged`
-    // and posted its own comment; adding `ready:<agent>` here would auto-advance
-    // partial work, which is exactly what the salvage path is designed to prevent.
-    // Also skipped by the empty-branch guard above (early `return`) when an agent
-    // that's supposed to commit produced nothing.
-    if (item.issueNumber > 0 && !saferSalvaged) {
-      // Gather state — labels + post-run column. Both can fail with API
-      // errors; collect what we have and let `decidePostRunLabels` choose
-      // the cautious branch when state is missing.
-      let postLabels: string[] = [];
-      try {
-        postLabels = await client.getIssueLabels(item.issueNumber);
-      } catch (e) {
-        console.warn(`   ⚠️  Failed to check post-run labels: ${e}`);
-      }
-      let currentColumn: string | null = null;
-      try {
-        currentColumn = await client.getItemStatus(item.issueNumber, { forceRefresh: true });
-      } catch (e) {
-        console.warn(`   ⚠️  Failed to fetch post-run status for #${item.issueNumber}: ${e}`);
-      }
-
-      // Pure decision in lib.ts — caller below applies the side effects.
-      // See decidePostRunLabels for the routing rules; tests in lib.test.ts.
-      const decision = decidePostRunLabels({
-        postLabels,
-        agentName: agent.name,
-        agentColumn: agent.column,
-        currentColumn,
-      });
-
-      if (decision.shouldStripLegacyNeedsRework) {
-        try { await client.removeLabel(item.issueNumber, "needs-rework"); } catch {}
-      }
-
-      if (decision.addReadyLabel) {
-        try {
-          await client.addLabel(item.issueNumber, `ready:${agent.name}`);
-          console.log(`   🏷️  Added ready:${agent.name} to #${item.issueNumber}`);
-        } catch (e) {
-          console.warn(`   ⚠️  Failed to add ready:${agent.name} label: ${e}`);
-        }
-      } else {
-        switch (decision.logKind) {
-          case "rework":
-            console.log(`   🔄 Rework requested → needs-rework:${decision.reworkTarget}`);
-            break;
-          case "moved-out":
-            console.log(`   📋 Agent moved #${item.issueNumber} ${agent.column} → ${currentColumn} — skipping ready:${agent.name}`);
-            break;
-          case "status-unknown":
-            console.log(`   ⚠️  Skipping ready:${agent.name} for #${item.issueNumber} (status fetch failed; will retry next cycle)`);
-            break;
-        }
-      }
-
-      try {
-        await client.addComment(
-          item.issueNumber,
-          decision.reworkTarget
-            ? `## 🤖 ${agent.description}\n\n${agent.name} agent flagged issues on this ticket → rework by **${decision.reworkTarget}**.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Needs rework by ${decision.reworkTarget}.** See agent findings above.`
-            : `## 🤖 ${agent.description}\n\n${agent.name} agent has completed work on this ticket.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Ready for human review.** Move to the next column when approved.`
-        );
-      } catch (e) {
-        console.warn(`   ⚠️  Failed to post completion comment: ${e}`);
-      }
-    }
-
-    if (!saferSalvaged) {
-      await notifyDiscord(`✅ **${agent.name}** finished #${item.issueNumber}: ${item.title}\n${item.url}\nReady for review.`);
-    }
+    const postRun = await handlePostRun(streamResult, ctx, saferSalvaged);
+    if (!postRun.ok) return;
 
   } catch (error: any) {
     await handleDispatchError(error, ctx, streamResult);
@@ -1388,6 +1154,261 @@ async function handleAgentResultErrors(
   }
 
   return saferSalvaged;
+}
+
+// Post-run side-effect chain after a successful (or successfully-salvaged)
+// claude invocation: usage logging, safety-net commit, push, empty-branch
+// guard, post-success labeling via `decidePostRunLabels`, completion
+// comment, Discord notify.
+//
+// Returns `{ ok: false }` for the push-failure and empty-branch-guard
+// paths. The orchestrator treats that as an early-return that DELIBERATELY
+// skips cleanupAfterDispatch — those paths preserve the worktree as
+// evidence for human triage. Today's behavior; preserve verbatim.
+async function handlePostRun(
+  streamResult: StreamResult,
+  ctx: DispatchContext,
+  saferSalvaged: boolean,
+): Promise<{ ok: true } | { ok: false }> {
+  const { agent, item, client, agentCwd, useWorktree, branchName, logFile, startTime } = ctx;
+
+  const output = streamResult.output;
+  const u = streamResult.usage;
+  const usageSummary = [
+    `Turns: ${streamResult.numTurns}`,
+    `Duration: ${Math.round(streamResult.durationMs / 1000)}s`,
+    `Input tokens: ${(u as any).input_tokens ?? 0}`,
+    `Output tokens: ${(u as any).output_tokens ?? 0}`,
+    `Cache read: ${(u as any).cache_read_input_tokens ?? 0}`,
+    `Cache creation: ${(u as any).cache_creation_input_tokens ?? 0}`,
+    `Cost: $${streamResult.totalCostUsd.toFixed(4)}`,
+    `Session: ${streamResult.sessionId}`,
+  ].join(" | ");
+
+  writeLog(logFile, "OUTPUT (success)", output);
+  writeLog(logFile, "USAGE", usageSummary);
+  console.log(`   📊 ${usageSummary}`);
+
+  const endTs = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const elapsedMin = Math.round((Date.now() - startTime) / 60_000);
+  // On the salvage path, attemptSaferSalvage already printed its own
+  // "💾 Safer salvage: draft PR opened..." line; printing "✅ completed"
+  // here would be misleading (the agent did NOT complete — work was
+  // salvaged mid-run). Output dump still useful for debugging either way.
+  if (!saferSalvaged) {
+    console.log(`   [${endTs}] ✅ ${agent.name} completed (${elapsedMin}min)`);
+  } else {
+    console.log(`   [${endTs}] 💾 ${agent.name} salvaged after ${elapsedMin}min`);
+  }
+  console.log(`   Output (last 1000 chars):\n${output.slice(-1000)}`);
+
+  // Safety net: commit any uncommitted changes BEFORE worktree cleanup
+  // destroys them. Surfaced on #27 (architect's spec was Written but not
+  // committed; `git worktree remove --force` destroyed it silently). Each
+  // agent's CLAUDE.md should already commit its work, but this catches the
+  // case where an agent forgets — which has happened, and the failure mode
+  // is silent loss of the run's output. Run unconditionally inside the
+  // worktree so we don't have to know which agents write files.
+  if (item.issueNumber > 0 && useWorktree) {
+    try {
+      const dirty = execSync(`git status --porcelain`, { cwd: agentCwd, stdio: "pipe" }).toString();
+      if (shouldAutoCommit(dirty)) {
+        execSync(`git add -A`, { cwd: agentCwd, stdio: "pipe" });
+        // argv-based commit so agent.name (currently from a hardcoded
+        // enum, but configurability is a routine refactor away) can't
+        // ever break out of `-m`'s quoting. Same discipline used in
+        // attemptSaferSalvage's commit + push above.
+        const cm = spawnSync(
+          "git",
+          [
+            "commit",
+            "-m", `${agent.name}: auto-commit uncommitted changes for #${item.issueNumber}`,
+          ],
+          { cwd: agentCwd, stdio: "pipe", timeout: 15_000 },
+        );
+        if (cm.status !== 0) {
+          throw new Error(`git commit failed: ${cm.stderr?.toString() || cm.stdout?.toString() || "unknown"}`);
+        }
+        console.log(`   💾 Auto-committed uncommitted changes (agent forgot to commit)`);
+      }
+    } catch (e) {
+      console.warn(`   ⚠️  Failed safety-net commit: ${e}`);
+    }
+  }
+
+  // Push the feature branch from the worktree. Only agents that use a
+  // worktree produce commits worth pushing; gating on useWorktree avoids
+  // the cosmetic "src refspec doesn't match any" failure for PO runs
+  // (PO doesn't write code, has no worktree, has no branch to push).
+  //
+  // **Push success is a precondition for treating the agent's verdict as
+  // canonical.** If push fails (typically non-fast-forward — the worktree
+  // is stale relative to origin, often because someone pushed out-of-band
+  // during the run), the agent's commits never reached origin. Downstream
+  // agents would work against pre-run main; code review would judge stale
+  // code. Treat as `error:<agent>`, skip ready-labeling, and bail — human
+  // strips the error label after deciding to retry or salvage. Surfaced
+  // 2026-05-07 when code-review on #155 ran on a stale worktree, FAILed,
+  // tried to push its review comments, hit non-fast-forward, but the
+  // dispatcher continued to apply ready:code-review and auto-advance.
+  if (item.issueNumber > 0 && useWorktree) {
+    try {
+      execSync(`git push -u origin ${branchName}`, { cwd: agentCwd, stdio: "pipe" });
+      console.log(`   📤 Pushed ${branchName} to origin`);
+    } catch (e: any) {
+      const stderr = e?.stderr?.toString?.() ?? "";
+      const stdout = e?.stdout?.toString?.() ?? "";
+      const detail = [stderr, stdout].filter(Boolean).join("\n").trim() || (e?.message ?? String(e));
+      console.error(`   ❌ Failed to push ${branchName} — agent's commits never reached origin. Treating as error:${agent.name}.`);
+      console.error(`      ${detail.replace(/\n/g, "\n      ")}`);
+      try {
+        await client.addLabel(item.issueNumber, `error:${agent.name}`);
+      } catch {}
+      try {
+        await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\n\`git push -u origin ${branchName}\` failed — the agent's commits never reached origin. Common cause: out-of-band push to \`${branchName}\` advanced the remote past this worktree's HEAD (non-fast-forward).\n\nTreating as \`error:${agent.name}\`. To retry: investigate the worktree state, rebase if appropriate, then strip the \`error:${agent.name}\` label.\n\n\`\`\`\n${detail}\n\`\`\``);
+      } catch {}
+      return { ok: false };
+    }
+  }
+
+  // Empty-branch guard: agents that are supposed to produce commits
+  // (architect/developer/documentation) but exit cleanly with the
+  // branch still 0 ahead of `main` are silent failures. Treat as
+  // `error:<agent>` to force human triage instead of auto-advancing
+  // a no-op past `ready:<agent>`.
+  //
+  // Belt-and-suspenders against a class the agents themselves can't
+  // reliably catch: each agent in the relay #5 incident (2026-05-08)
+  // did the right thing prose-wise (refused to act without prerequisites,
+  // posted a meaningful comment), but the dispatcher had no
+  // deterministic check that the prose matched the branch state.
+  // The auto-commit safety net above catches "agent wrote files but
+  // forgot to commit"; this catches "agent didn't write anything."
+  //
+  // Skipped on saferSalvaged: salvage already labeled
+  // `error:max_turns_salvaged` and opened a draft PR with whatever
+  // commits exist. The `usesWorktree` gate excludes PO (no branch
+  // to count). The `shouldProduceCommits` predicate inside
+  // `shouldFlagEmptyBranch` excludes code-review (PR comments only).
+  if (item.issueNumber > 0 && useWorktree && !saferSalvaged && shouldProduceCommits(agent)) {
+    let commitsAhead = -1;
+    try {
+      const out = execSync(
+        `git rev-list --count main..${branchName}`,
+        { cwd: agentCwd, stdio: "pipe" },
+      ).toString();
+      commitsAhead = parseCommitsAhead(out);
+    } catch (e: any) {
+      // Don't act on git errors — `parseCommitsAhead` returns -1 for
+      // unparseable input, and `shouldFlagEmptyBranch` returns false
+      // on negative values, so the guard becomes a no-op when git
+      // can't tell us the answer. Surface the failure so operators
+      // see why the guard didn't fire on a possibly-empty branch.
+      const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
+      console.warn(`   ⚠️  Failed to count commits ahead of main (empty-branch guard skipped): ${detail.slice(0, 300)}`);
+    }
+    if (shouldFlagEmptyBranch(agent, commitsAhead)) {
+      console.error(`   ❌ ${agent.name} produced no commits — branch is 0 ahead of main. Treating as error:${agent.name}.`);
+      try {
+        await client.addLabel(item.issueNumber, `error:${agent.name}`);
+      } catch (e) {
+        console.warn(`   ⚠️  Failed to add error:${agent.name} label: ${e}`);
+      }
+      try {
+        await client.addComment(
+          item.issueNumber,
+          `## ⚠️ Dispatch Error: ${agent.name} produced no commits\n\n` +
+          `Branch \`${branchName}\` is 0 commits ahead of \`main\` after the run completed. ` +
+          `This agent (\`${agent.name}\`) is expected to produce commits during a normal run; an empty branch usually means the agent silently refused or pattern-matched its way out of the work without raising a structured signal.\n\n` +
+          `Likely causes:\n` +
+          `- Upstream prerequisite not visible to the agent (missing spec, blocker semantics, or repo-side label gap)\n` +
+          `- Agent posted comments instead of writing files (mechanical-contract violation)\n` +
+          `- Pre-existing branch state already contained the work (rare; check \`git log main..${branchName}\`)\n\n` +
+          `Treating as \`error:${agent.name}\`. To unblock: investigate the agent's run log, fix the underlying cause, then strip the \`error:${agent.name}\` label to retry — or route via \`needs-rework:<previous-agent>\` if the upstream needs to redo its handoff.`,
+        );
+      } catch (e) {
+        console.warn(`   ⚠️  Failed to post empty-branch error comment: ${e}`);
+      }
+      return { ok: false };
+    }
+  }
+
+  // Post-success labeling
+  // Convention: agents add needs-rework:{target} directly (target = who should fix it).
+  // The dispatch detects any needs-rework:* label and treats it as a rework signal.
+  // Skipped when saferSalvaged: that path already set `error:max_turns_salvaged`
+  // and posted its own comment; adding `ready:<agent>` here would auto-advance
+  // partial work, which is exactly what the salvage path is designed to prevent.
+  // Also skipped by the empty-branch guard above (early `return`) when an agent
+  // that's supposed to commit produced nothing.
+  if (item.issueNumber > 0 && !saferSalvaged) {
+    // Gather state — labels + post-run column. Both can fail with API
+    // errors; collect what we have and let `decidePostRunLabels` choose
+    // the cautious branch when state is missing.
+    let postLabels: string[] = [];
+    try {
+      postLabels = await client.getIssueLabels(item.issueNumber);
+    } catch (e) {
+      console.warn(`   ⚠️  Failed to check post-run labels: ${e}`);
+    }
+    let currentColumn: string | null = null;
+    try {
+      currentColumn = await client.getItemStatus(item.issueNumber, { forceRefresh: true });
+    } catch (e) {
+      console.warn(`   ⚠️  Failed to fetch post-run status for #${item.issueNumber}: ${e}`);
+    }
+
+    // Pure decision in lib.ts — caller below applies the side effects.
+    // See decidePostRunLabels for the routing rules; tests in lib.test.ts.
+    const decision = decidePostRunLabels({
+      postLabels,
+      agentName: agent.name,
+      agentColumn: agent.column,
+      currentColumn,
+    });
+
+    if (decision.shouldStripLegacyNeedsRework) {
+      try { await client.removeLabel(item.issueNumber, "needs-rework"); } catch {}
+    }
+
+    if (decision.addReadyLabel) {
+      try {
+        await client.addLabel(item.issueNumber, `ready:${agent.name}`);
+        console.log(`   🏷️  Added ready:${agent.name} to #${item.issueNumber}`);
+      } catch (e) {
+        console.warn(`   ⚠️  Failed to add ready:${agent.name} label: ${e}`);
+      }
+    } else {
+      switch (decision.logKind) {
+        case "rework":
+          console.log(`   🔄 Rework requested → needs-rework:${decision.reworkTarget}`);
+          break;
+        case "moved-out":
+          console.log(`   📋 Agent moved #${item.issueNumber} ${agent.column} → ${currentColumn} — skipping ready:${agent.name}`);
+          break;
+        case "status-unknown":
+          console.log(`   ⚠️  Skipping ready:${agent.name} for #${item.issueNumber} (status fetch failed; will retry next cycle)`);
+          break;
+      }
+    }
+
+    try {
+      await client.addComment(
+        item.issueNumber,
+        decision.reworkTarget
+          ? `## 🤖 ${agent.description}\n\n${agent.name} agent flagged issues on this ticket → rework by **${decision.reworkTarget}**.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Needs rework by ${decision.reworkTarget}.** See agent findings above.`
+          : `## 🤖 ${agent.description}\n\n${agent.name} agent has completed work on this ticket.\n\n<details>\n<summary>Agent output (click to expand)</summary>\n\n\`\`\`\n${output.slice(-3000)}\n\`\`\`\n</details>\n\n**Ready for human review.** Move to the next column when approved.`
+      );
+    } catch (e) {
+      console.warn(`   ⚠️  Failed to post completion comment: ${e}`);
+    }
+  }
+
+  if (!saferSalvaged) {
+    await notifyDiscord(`✅ **${agent.name}** finished #${item.issueNumber}: ${item.title}\n${item.url}\nReady for review.`);
+  }
+
+  return { ok: true };
 }
 
 // Worktree + main-repo cleanup that runs after every dispatch
