@@ -4,17 +4,34 @@ This is the dispatcher and agent-prompts repo for **pyrycode-relay**. The Go sou
 
 This repo is forked from `pyrycode/agents` (see `README.md` for the upstream sync recipe). Dispatcher source is shared with the upstream; agent prompts are relay-specific (e.g. `--repo pyrycode/pyrycode-relay`, relay-context security model). Bring upstream dispatcher fixes in via the two-PR sync pattern.
 
+## Dispatcher source layout (post-2026-05-09 split)
+
+The pure-function helpers used to live in a single `lib.ts`. As of 2026-05-09 they're split across five files; `lib.ts` is now a thin barrel re-export.
+
+| File | Owns |
+|---|---|
+| `dispatch/src/pipeline-decisions.ts` | Auto-advance rules + decision, rework routing, done-cleanup, post-run labels, label predicates, rework-target extraction, rework-loop circuit breaker, advance-rule lookup |
+| `dispatch/src/agent-runtime.ts` | `shouldUseWorktree`, `maxTurnsFor`, salvage gating (`shouldAttemptSafeSalvage`, `findReadyPrNumber`, `extractRateLimitInfo`), `SPAWN_ENV_DENYLIST` + `scrubSpawnEnv` |
+| `dispatch/src/worktree.ts` | `shouldAutoCommit`, `decideCodegraphSymlink`, `decideBranchSetup`, `findWorktreesForBranch`, `resolveAgentsRepoRoot`, `resolveTargetRepoRoot` |
+| `dispatch/src/blockers.ts` | `hasOpenBlockers`, `shouldSkipBlockedFor`, `shouldProduceCommits`, `parseCommitsAhead`, `shouldFlagEmptyBranch` |
+| `dispatch/src/dispatch-selection.ts` | `AGENT_COLUMN_MAP`, `selectDispatches` |
+| `dispatch/src/lib.ts` | Barrel re-export only (kept one cycle for `dispatch.ts` + tests) |
+
+Cross-file deps form a clean DAG: pipeline-decisions → blockers; dispatch-selection → pipeline-decisions + blockers; worktree and agent-runtime are leaves.
+
+**New code:** prefer importing from the specific module (`from "./pipeline-decisions.js"`) over the barrel. The barrel's `export * from` lineup will likely shrink once `dispatch.ts` and tests have flipped to direct imports.
+
 ## Use codegraph for dispatcher-side reading
 
 `pyrycode-relay/agents/` is indexed for codegraph (`.codegraph/`, gitignored). Default to `mcp__codegraph__codegraph_*` MCP tools for symbol-level questions before reaching for grep:
 
-- **Before changing or removing any exported function in `dispatch/src/lib.ts`** — run `codegraph_callers <name>` to find the call sites in `dispatch.ts`, `reconcile.ts`, and the test files. The dispatcher's pure-function decomposition means a "small" rename in `lib.ts` typically fans out to 3–5 sites.
+- **Before changing or removing any exported function** — run `codegraph_callers <name>` to find the call sites across `dispatch.ts`, `reconcile.ts`, sibling lib files, and the test files. The dispatcher's pure-function decomposition means a "small" rename typically fans out to 3–5 sites.
 - **Before extending `dispatch.ts` with a new post-run handler** — run `codegraph_callees <name>` against neighbouring handlers (`decidePostRunLabels`, `runAutoAdvance`, `runReworkRouting`) to mirror their shape.
 - **For "where is this used / what calls what" across the dispatcher** — `codegraph_context "<area phrase>"` returns the entry points + related symbols faster than reading the files end-to-end.
 
 The same fall-back rules apply as in agent CLAUDE.mds: use grep/Read for comments, string literals, docs, or pending edits the canonical index doesn't yet reflect.
 
-**Re-index when finished:** the dispatcher's worktree symlink (`decideCodegraphSymlink` in `lib.ts`) points spawned agents at the canonical `.codegraph/`. After a substantive change to dispatcher source, run `codegraph index -f` from `agents/` so the next dispatcher run sees the new symbols. (`codegraph sync` doesn't always pick up changes — confirmed 2026-05-09.)
+**Re-index when finished:** the dispatcher's worktree symlink (`decideCodegraphSymlink` in `worktree.ts`) points spawned agents at the canonical `.codegraph/`. After a substantive change to dispatcher source, run `codegraph index -f` from `agents/` so the next dispatcher run sees the new symbols. (`codegraph sync` doesn't always pick up changes — confirmed 2026-05-09.)
 
 **Querying from a different cwd (e.g. the vault):** the codegraph MCP tools accept a `projectPath` argument — pass `/Users/<you>/Workspace/Projects/pyrycode-relay/agents` to query the dispatcher from any session, regardless of where Claude Code was launched. Without `projectPath` the MCP server falls back to CWD, which usually isn't the project root.
 
@@ -22,11 +39,11 @@ The same fall-back rules apply as in agent CLAUDE.mds: use grep/Read for comment
 
 Test-first applies to dispatcher edits as much as it does to dispatched developer agents. RED → GREEN → REFACTOR. Failing test in `lib.test.ts` (or `reconcile.test.ts`) first; implementation after. Backfilling tests after the fact ships bugs first — see PROJECT-MEMORY's "Straightforward state mutation is a smell phrase" lesson.
 
-The dispatcher is < 1500 lines of pure functions plus a thin orchestrator. Reading the source is cheap; theorizing without reading produces wrong answers (PROJECT-MEMORY: "Read the actual code before guessing").
+The dispatcher is ~1500 lines of pure functions (split across pipeline-decisions / agent-runtime / worktree / blockers / dispatch-selection) plus a thin orchestrator (`dispatch.ts`). Reading the source is cheap; theorizing without reading produces wrong answers (PROJECT-MEMORY: "Read the actual code before guessing").
 
 ## Belt-and-suspenders
 
-Every "agent does X" rule needs a deterministic dispatcher-side safety net for X. Two stochastic rules verifying each other share the same failure mode. Recent examples in `lib.ts` / `dispatch.ts`:
+Every "agent does X" rule needs a deterministic dispatcher-side safety net for X. Two stochastic rules verifying each other share the same failure mode. Recent examples in the pure-function lib + `dispatch.ts`:
 
 - **Empty-branch guard** (`shouldFlagEmptyBranch`) — backstops architect/developer/documentation prose with a deterministic commit-count check
 - **Auto-commit safety net** — backstops the agent's "remember to commit" instruction
