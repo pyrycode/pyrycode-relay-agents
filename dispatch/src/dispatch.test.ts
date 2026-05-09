@@ -28,7 +28,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  cleanupAfterDispatch,
   handleAgentResultErrors,
+  handleDispatchError,
   handlePostRun,
   makeDispatchContext,
   prepareAgentSpawn,
@@ -1421,5 +1423,145 @@ describe("handlePostRun — coverage edges", () => {
       client.removeLabelCalls.some(c => c.issueNumber === 421 && c.label === "needs-rework"),
       "legacy needs-rework must be stripped",
     );
+  });
+});
+
+// =====================================================================
+// handleDispatchError
+// =====================================================================
+//
+// 4 tests: with-sessionId (resume hint surfaces), null streamResult
+// (no resume hint), issue-0 manual dispatch (no GH side effects), and
+// silent-catch on label/comment failure.
+
+describe("handleDispatchError", () => {
+  test("streamResult with sessionId → resume hint in error log + comment", async () => {
+    const { ctx, client, calls } = makeTestContext({ item: { issueNumber: 500 } });
+
+    await handleDispatchError(
+      new Error("agent crashed mid-run"),
+      ctx,
+      streamResult({ sessionId: "sess-abc-123" }),
+    );
+
+    // Label + comment fired.
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 500, label: "error:developer" }]);
+    assert.equal(client.comments.length, 1);
+    // Resume hint surfaces in the comment Body — load-bearing for
+    // JSONL-replay recovery (the path that recovered #27's spec).
+    assert.match(client.comments[0]!.body, /claude --resume sess-abc-123/);
+    // Discord notify fires once.
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /❌.*developer.*failed on #500/);
+  });
+
+  test("streamResult is null → 'unknown' sessionId, no resume hint in comment", async () => {
+    const { ctx, client } = makeTestContext({ item: { issueNumber: 501 } });
+
+    await handleDispatchError(new Error("setup failed before stream"), ctx, null);
+
+    assert.equal(client.comments.length, 1);
+    assert.ok(
+      !/claude --resume/.test(client.comments[0]!.body),
+      "no sessionId → no resume hint (would be misleading)",
+    );
+  });
+
+  test("issue-0 manual dispatch → console.error + Discord notify only, no label/comment", async () => {
+    // Issue 0 (and any issueNumber <= 0) means there's no GitHub
+    // ticket to label/comment on — the manual-dispatch CLI path.
+    // Discord notify still fires (operator visibility), but no
+    // GitHub-side mutations.
+    const { ctx, client, calls } = makeTestContext({ item: { issueNumber: 0 } });
+
+    await handleDispatchError(new Error("manual dispatch crashed"), ctx, null);
+
+    assert.equal(client.addLabelCalls.length, 0, "issue-0 must not addLabel");
+    assert.equal(client.comments.length, 0, "issue-0 must not addComment");
+    assert.equal(calls.discord.length, 1, "Discord notify still fires for operator visibility");
+  });
+
+  test("addLabel + addComment both fail → silent catch, function still completes (Discord still notified)", async () => {
+    // The label/comment side effects are wrapped in `try {}` blocks
+    // that swallow errors — the dispatcher must not crash when the
+    // GitHub API is flaky during error handling. Discord notify is
+    // OUTSIDE the catches and fires unconditionally.
+    const client = new MockGitHubClient();
+    client.failures.addLabel = new Error("graphql 500");
+    client.failures.addComment = new Error("rest 502");
+    const { ctx, calls } = makeTestContext({ item: { issueNumber: 502 }, client });
+
+    // Must NOT throw.
+    await handleDispatchError(new Error("agent error"), ctx, null);
+
+    // Both API calls were attempted (and threw silently). The mock
+    // records attempts regardless of failure injection — that's the
+    // assertable surface. Production behavior is "the dispatcher
+    // tried, the API said no, the dispatcher kept going."
+    assert.equal(client.addLabelCalls.length, 1, "addLabel attempt recorded");
+    assert.equal(client.comments.length, 1, "addComment attempt recorded");
+    // Discord notify still fires (outside the silent catches).
+    assert.equal(calls.discord.length, 1);
+  });
+});
+
+// =====================================================================
+// cleanupAfterDispatch
+// =====================================================================
+//
+// 3 tests: useWorktree=true (full cleanup), useWorktree=false (return
+// to main only), worktree-remove failure tolerated.
+
+describe("cleanupAfterDispatch", () => {
+  test("useWorktree=true → git worktree remove --force + checkout -- . + clean -fd", async () => {
+    const { ctx, calls } = makeTestContext({ item: { issueNumber: 600 } });
+
+    await cleanupAfterDispatch(ctx);
+
+    const cmds = calls.exec.map(c => c.cmd);
+    assert.ok(
+      cmds.some(c => c.includes("git worktree remove --force")),
+      "must remove the worktree",
+    );
+    assert.ok(
+      cmds.some(c => c === "git checkout -- ."),
+      "must reset main repo's working tree (catches Claude Code's leaked .claude/worktrees/)",
+    );
+    assert.ok(
+      cmds.some(c => c.startsWith("git clean -fd")),
+      "must clean untracked files in the main repo (with logs/node_modules excluded)",
+    );
+    // useWorktree=true → no `git checkout main` (which is the no-worktree path).
+    assert.ok(!cmds.includes("git checkout main"));
+  });
+
+  test("useWorktree=false (PO path) → git checkout main, no worktree ops", async () => {
+    const { ctx, calls } = makeTestContext({
+      agent: { name: "po", column: "Backlog", claudeMdPath: "po/CLAUDE.md", usesWorktree: false, producesCommits: false },
+      item: { issueNumber: 601 },
+    });
+
+    await cleanupAfterDispatch(ctx);
+
+    const cmds = calls.exec.map(c => c.cmd);
+    assert.deepEqual(cmds, ["git checkout main"], "PO cleanup is exactly one command");
+  });
+
+  test("git worktree remove fails → warning logged, function does not throw", async () => {
+    // The worktree-remove try is wrapped in a `try {}` that swallows
+    // the error; cleanup proceeds to checkout/clean. The dispatcher
+    // can't usefully recover from a stuck worktree mid-cleanup, so
+    // it logs and moves on.
+    const { ctx } = makeTestContext({
+      item: { issueNumber: 602 },
+      mockOptions: {
+        execImpls: {
+          "git worktree remove --force": () => execError({ stderr: "fatal: '<path>' is locked" }),
+        },
+      },
+    });
+
+    // Must NOT throw.
+    await assert.doesNotReject(cleanupAfterDispatch(ctx));
   });
 });
