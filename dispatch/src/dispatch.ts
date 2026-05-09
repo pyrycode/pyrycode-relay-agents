@@ -1294,34 +1294,48 @@ async function dispatchToAgent(
     }
 
   } catch (error: any) {
-    const sessionId = streamResult?.sessionId || "unknown";
-    const sessionHint = sessionId !== "unknown"
-      ? `\nSession: ${sessionId} (resume with: claude --resume ${sessionId})`
-      : "";
-    writeLog(logFile, "ERROR", `${error.message}${sessionHint}`);
-
-    const endTs = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-    const elapsedMin = Math.round((Date.now() - startTime) / 60_000);
-    console.error(`   [${endTs}] ❌ ${agent.name} failed (${elapsedMin}min): ${error.message}`);
-    if (sessionId !== "unknown") {
-      console.error(`   🔍 Resume session: claude --resume ${sessionId}`);
-    }
-    if (item.issueNumber > 0) {
-      try {
-        await client.addLabel(item.issueNumber, `error:${agent.name}`);
-        console.log(`   🏷️  Added error:${agent.name} to #${item.issueNumber}`);
-      } catch {}
-      try {
-        await client.addComment(
-          item.issueNumber,
-          `## ⚠️ Agent Error: ${agent.name}\n\nThe ${agent.name} agent encountered an error:\n\n\`\`\`\n${error.message.slice(-2000)}\n\`\`\`${sessionId !== "unknown" ? `\n\n**Debug**: \`claude --resume ${sessionId}\`` : ""}\n\nManual intervention required.`
-        );
-      } catch {}
-    }
-    await notifyDiscord(`❌ **${agent.name}** failed on #${item.issueNumber}: ${item.title}\n${item.url}\nManual intervention required.`);
+    await handleDispatchError(error, ctx, streamResult);
   }
 
   await cleanupAfterDispatch(ctx);
+}
+
+// Outer catch-block body for dispatchToAgent. Logs the error, posts
+// `error:<agent>` label + diagnostic comment + Discord notify. The
+// session-id resume hint is the load-bearing piece for JSONL-replay
+// recovery — preserve verbatim. Issue-0 (manual dispatch) skips the
+// label/comment side effects.
+async function handleDispatchError(
+  error: any,
+  ctx: DispatchContext,
+  streamResult: StreamResult | null,
+): Promise<void> {
+  const { agent, item, client, logFile, startTime } = ctx;
+  const sessionId = streamResult?.sessionId || "unknown";
+  const sessionHint = sessionId !== "unknown"
+    ? `\nSession: ${sessionId} (resume with: claude --resume ${sessionId})`
+    : "";
+  writeLog(logFile, "ERROR", `${error.message}${sessionHint}`);
+
+  const endTs = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const elapsedMin = Math.round((Date.now() - startTime) / 60_000);
+  console.error(`   [${endTs}] ❌ ${agent.name} failed (${elapsedMin}min): ${error.message}`);
+  if (sessionId !== "unknown") {
+    console.error(`   🔍 Resume session: claude --resume ${sessionId}`);
+  }
+  if (item.issueNumber > 0) {
+    try {
+      await client.addLabel(item.issueNumber, `error:${agent.name}`);
+      console.log(`   🏷️  Added error:${agent.name} to #${item.issueNumber}`);
+    } catch {}
+    try {
+      await client.addComment(
+        item.issueNumber,
+        `## ⚠️ Agent Error: ${agent.name}\n\nThe ${agent.name} agent encountered an error:\n\n\`\`\`\n${error.message.slice(-2000)}\n\`\`\`${sessionId !== "unknown" ? `\n\n**Debug**: \`claude --resume ${sessionId}\`` : ""}\n\nManual intervention required.`
+      );
+    } catch {}
+  }
+  await notifyDiscord(`❌ **${agent.name}** failed on #${item.issueNumber}: ${item.title}\n${item.url}\nManual intervention required.`);
 }
 
 // Worktree + main-repo cleanup that runs after every dispatch
