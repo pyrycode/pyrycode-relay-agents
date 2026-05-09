@@ -892,79 +892,9 @@ async function dispatchToAgent(
     }
   }
 
-  // Build prompt AFTER worktree creation so specs are read from the feature branch
-  const prompt = await buildPromptForAgent(agent, item, agentCwd);
-
-  // Re-index QMD in the worktree so the agent has the latest docs.
-  // Gated on useWorktree because there's no isolated tree to re-index in
-  // the no-worktree path; running QMD in repoRoot would mutate main's
-  // index across other dispatcher cycles.
-  if (useWorktree) {
-    try {
-      execSync(`qmd update 2>&1 && qmd embed 2>&1`, { cwd: agentCwd, encoding: "utf-8", timeout: 120_000 });
-      console.log(`   📚 QMD index updated`);
-    } catch (e: any) {
-      // execSync attaches captured stdout/stderr to the thrown error.
-      // The previous catch only stringified `e` (Error message only) —
-      // qmd's actual failure message was hidden, leaving us guessing.
-      // Surface both so the next failure produces actionable diagnostic
-      // data (qmd's own error text, not just "Command failed: qmd...").
-      const stdout = e.stdout?.toString().trim() ?? "";
-      const stderr = e.stderr?.toString().trim() ?? "";
-      const detail = [stderr, stdout].filter(s => s.length > 0).join("\n");
-      const indented = detail ? "\n      " + detail.split("\n").join("\n      ") : "";
-      console.warn(`   ⚠️  QMD re-index failed (agents will use stale index): ${e.message}${indented}`);
-    }
-  }
-
-  // Agent CLAUDE.md files live in the agents repo, not the main repo
-  const claudeMdPath = resolve(agentsRepoRoot, agent.claudeMdPath);
-  let systemPrompt: string;
-  try {
-    systemPrompt = readFileSync(claudeMdPath, "utf-8");
-  } catch (e) {
-    console.error(`   ❌ Agent CLAUDE.md not found: ${claudeMdPath}`);
-    if (item.issueNumber > 0) {
-      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nAgent CLAUDE.md not found at \`${agent.claudeMdPath}\`. Check types.ts configuration.`);
-    }
-    if (useWorktree) {
-      try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" }); } catch {}
-    }
-    return;
-  }
-
-  const promptFile = resolve(__dirname, `../.prompt-${item.issueNumber}.txt`);
-  const systemPromptFile = resolve(__dirname, `../.system-prompt-${agent.name}.txt`);
-  writeFileSync(promptFile, prompt);
-  writeFileSync(systemPromptFile, systemPrompt);
-
-  // Turn limits: see `maxTurnsFor` in lib.ts for rationale (base 70,
-  // code-review 100). Bumped 60 → 70 on 2026-05-03 after Mode-E cluster
-  // (#128, #75, #99) hit at turn 60-61 in the housekeeping phase.
-  const maxTurns = maxTurnsFor(agent);
-  const isCodeReview = agent.name === "code-review";
-
-  // Tool access per agent role
-  // codegraph tools are read-only Go-symbol queries (callers/callees/impact/search/etc) backed
-  // by the .codegraph/ index in pyrycode/. Bootstrap once with `codegraph index .`; subsequent
-  // updates via `codegraph sync` (or the mark-dirty / sync-if-dirty hook pair).
-  const baseTools = "Bash,Read,Write,Edit,Glob,Grep,TodoWrite,mcp__qmd__query,mcp__qmd__get,mcp__qmd__multi_get,mcp__qmd__status,mcp__context7__resolve-library-id,mcp__context7__query-docs,mcp__codegraph__codegraph_search,mcp__codegraph__codegraph_callers,mcp__codegraph__codegraph_callees,mcp__codegraph__codegraph_impact,mcp__codegraph__codegraph_node,mcp__codegraph__codegraph_context,mcp__codegraph__codegraph_files,mcp__codegraph__codegraph_status";
-  const needsAgent = ["architect", "code-review"].includes(agent.name);
-  let allowedTools = baseTools;
-  if (needsAgent) allowedTools += ",Agent";
-
+  const spawn = await prepareAgentSpawn(ctx);
+  if (!spawn.ok) return;
   const { logFile } = ctx;
-  // Timeout tiers: code-review 40min (sub-agents), developer/docs 25min, light agents 20min
-  const isMediumAgent = ["developer", "documentation"].includes(agent.name);
-  const timeoutMs = isCodeReview ? 2_400_000 : isMediumAgent ? 1_500_000 : 1_200_000;
-  const timeoutLabel = isCodeReview ? "40min" : isMediumAgent ? "25min" : "20min";
-
-  writeLog(logFile, "DISPATCH", `Agent: ${agent.name}\nTicket: #${item.issueNumber} — ${item.title}\nBranch: ${branchName}\nWorktree: ${useWorktree ? worktreeDir : "none (PO on main)"}\nMax turns: ${maxTurns}\nTimeout: ${timeoutLabel}\nAllowed tools: ${allowedTools}`);
-  writeLog(logFile, "PROMPT", prompt);
-  writeLog(logFile, "SYSTEM PROMPT", systemPrompt);
-
-  console.log(`   Running Claude Code as ${agent.name} (max ${maxTurns} turns)...`);
-  console.log(`   📝 Log: ${logFile}`);
 
   // Stream result is stored outside try so the catch handler can access session_id
   let streamResult: StreamResult | null = null;
@@ -974,22 +904,7 @@ async function dispatchToAgent(
   // (which would auto-advance partial work to code-review).
   let saferSalvaged = false;
   try {
-    streamResult = await runClaudeStreaming({
-      promptFile,
-      systemPromptFile,
-      model: "opus",
-      effort: "high",
-      maxTurns,
-      allowedTools,
-      cwd: agentCwd,
-      timeoutMs,
-      logFile,
-      // Scrub dispatcher secrets (GITHUB_TOKEN, board config, webhook URL)
-      // before handing the env to the spawned agent — claude has its own
-      // gh-auth credential store and doesn't need ours. See
-      // `SPAWN_ENV_DENYLIST` in lib.ts for the full list + rationale.
-      env: { ...scrubSpawnEnv(process.env), CLAUDE_CODE_ENTRYPOINT: agent.name } as NodeJS.ProcessEnv,
-    });
+    streamResult = await runClaudeStreaming(spawn.config);
 
     // Claude CLI can complete but report an error (e.g., max_turns reached, API error).
     // Special case: if the agent hit max_turns but already created a PR, treat as success.
@@ -1336,6 +1251,116 @@ async function handleDispatchError(
     } catch {}
   }
   await notifyDiscord(`❌ **${agent.name}** failed on #${item.issueNumber}: ${item.title}\n${item.url}\nManual intervention required.`);
+}
+
+type SpawnConfig = Parameters<typeof runClaudeStreaming>[0];
+
+// Build prompt + read agent CLAUDE.md + write prompt files + compute
+// turn/tool/timeout configuration. The returned `config` is the full
+// argument object for `runClaudeStreaming`.
+//
+// Returns `{ ok: false }` if the agent's CLAUDE.md is missing — that's
+// a configuration error, not a per-dispatch failure. Inline worktree
+// cleanup happens here too so dispatchToAgent's early-return doesn't
+// leak the worktree (the post-try cleanup at end of dispatchToAgent
+// would NOT run on this early-return path).
+async function prepareAgentSpawn(
+  ctx: DispatchContext,
+): Promise<{ ok: true; config: SpawnConfig } | { ok: false }> {
+  const { agent, item, client, agentCwd, useWorktree, worktreeDir, branchName, logFile } = ctx;
+
+  // Build prompt AFTER worktree creation so specs are read from the feature branch
+  const prompt = await buildPromptForAgent(agent, item, agentCwd);
+
+  // Re-index QMD in the worktree so the agent has the latest docs.
+  // Gated on useWorktree because there's no isolated tree to re-index in
+  // the no-worktree path; running QMD in repoRoot would mutate main's
+  // index across other dispatcher cycles.
+  if (useWorktree) {
+    try {
+      execSync(`qmd update 2>&1 && qmd embed 2>&1`, { cwd: agentCwd, encoding: "utf-8", timeout: 120_000 });
+      console.log(`   📚 QMD index updated`);
+    } catch (e: any) {
+      // execSync attaches captured stdout/stderr to the thrown error.
+      // The previous catch only stringified `e` (Error message only) —
+      // qmd's actual failure message was hidden, leaving us guessing.
+      // Surface both so the next failure produces actionable diagnostic
+      // data (qmd's own error text, not just "Command failed: qmd...").
+      const stdout = e.stdout?.toString().trim() ?? "";
+      const stderr = e.stderr?.toString().trim() ?? "";
+      const detail = [stderr, stdout].filter(s => s.length > 0).join("\n");
+      const indented = detail ? "\n      " + detail.split("\n").join("\n      ") : "";
+      console.warn(`   ⚠️  QMD re-index failed (agents will use stale index): ${e.message}${indented}`);
+    }
+  }
+
+  // Agent CLAUDE.md files live in the agents repo, not the main repo
+  const claudeMdPath = resolve(agentsRepoRoot, agent.claudeMdPath);
+  let systemPrompt: string;
+  try {
+    systemPrompt = readFileSync(claudeMdPath, "utf-8");
+  } catch (e) {
+    console.error(`   ❌ Agent CLAUDE.md not found: ${claudeMdPath}`);
+    if (item.issueNumber > 0) {
+      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nAgent CLAUDE.md not found at \`${agent.claudeMdPath}\`. Check types.ts configuration.`);
+    }
+    if (useWorktree) {
+      try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" }); } catch {}
+    }
+    return { ok: false };
+  }
+
+  const promptFile = resolve(__dirname, `../.prompt-${item.issueNumber}.txt`);
+  const systemPromptFile = resolve(__dirname, `../.system-prompt-${agent.name}.txt`);
+  writeFileSync(promptFile, prompt);
+  writeFileSync(systemPromptFile, systemPrompt);
+
+  // Turn limits: see `maxTurnsFor` in lib.ts for rationale (base 70,
+  // code-review 100). Bumped 60 → 70 on 2026-05-03 after Mode-E cluster
+  // (#128, #75, #99) hit at turn 60-61 in the housekeeping phase.
+  const maxTurns = maxTurnsFor(agent);
+  const isCodeReview = agent.name === "code-review";
+
+  // Tool access per agent role
+  // codegraph tools are read-only Go-symbol queries (callers/callees/impact/search/etc) backed
+  // by the .codegraph/ index in pyrycode/. Bootstrap once with `codegraph index .`; subsequent
+  // updates via `codegraph sync` (or the mark-dirty / sync-if-dirty hook pair).
+  const baseTools = "Bash,Read,Write,Edit,Glob,Grep,TodoWrite,mcp__qmd__query,mcp__qmd__get,mcp__qmd__multi_get,mcp__qmd__status,mcp__context7__resolve-library-id,mcp__context7__query-docs,mcp__codegraph__codegraph_search,mcp__codegraph__codegraph_callers,mcp__codegraph__codegraph_callees,mcp__codegraph__codegraph_impact,mcp__codegraph__codegraph_node,mcp__codegraph__codegraph_context,mcp__codegraph__codegraph_files,mcp__codegraph__codegraph_status";
+  const needsAgent = ["architect", "code-review"].includes(agent.name);
+  let allowedTools = baseTools;
+  if (needsAgent) allowedTools += ",Agent";
+
+  // Timeout tiers: code-review 40min (sub-agents), developer/docs 25min, light agents 20min
+  const isMediumAgent = ["developer", "documentation"].includes(agent.name);
+  const timeoutMs = isCodeReview ? 2_400_000 : isMediumAgent ? 1_500_000 : 1_200_000;
+  const timeoutLabel = isCodeReview ? "40min" : isMediumAgent ? "25min" : "20min";
+
+  writeLog(logFile, "DISPATCH", `Agent: ${agent.name}\nTicket: #${item.issueNumber} — ${item.title}\nBranch: ${branchName}\nWorktree: ${useWorktree ? worktreeDir : "none (PO on main)"}\nMax turns: ${maxTurns}\nTimeout: ${timeoutLabel}\nAllowed tools: ${allowedTools}`);
+  writeLog(logFile, "PROMPT", prompt);
+  writeLog(logFile, "SYSTEM PROMPT", systemPrompt);
+
+  console.log(`   Running Claude Code as ${agent.name} (max ${maxTurns} turns)...`);
+  console.log(`   📝 Log: ${logFile}`);
+
+  return {
+    ok: true,
+    config: {
+      promptFile,
+      systemPromptFile,
+      model: "opus",
+      effort: "high",
+      maxTurns,
+      allowedTools,
+      cwd: agentCwd,
+      timeoutMs,
+      logFile,
+      // Scrub dispatcher secrets (GITHUB_TOKEN, board config, webhook URL)
+      // before handing the env to the spawned agent — claude has its own
+      // gh-auth credential store and doesn't need ours. See
+      // `SPAWN_ENV_DENYLIST` in lib.ts for the full list + rationale.
+      env: { ...scrubSpawnEnv(process.env), CLAUDE_CODE_ENTRYPOINT: agent.name } as NodeJS.ProcessEnv,
+    },
+  };
 }
 
 // Worktree + main-repo cleanup that runs after every dispatch
