@@ -2249,3 +2249,243 @@ describe("runClosedSweep", () => {
     assert.equal(client.itemsByIssueNumber.get(909_010)!.status, "Backlog");
   });
 });
+
+// =====================================================================
+// runPreDispatchPrep
+// =====================================================================
+//
+// 3 tests for the pre-dispatch label prep loop. The agent-scoped strip
+// (`isPipelineLabelForAgent`) is the load-bearing invariant — pre-fix
+// the loop stripped ALL pipeline labels, silently erasing
+// error:<other-agent> signals from prior cycles (#9 review 2026-05-08).
+
+describe("runPreDispatchPrep", () => {
+  test("strips per-agent labels ONLY (does NOT touch other agents' labels — the #9 fix)", async () => {
+    const client = new MockGitHubClient({
+      labels: { 1000: ["ready:developer", "error:architect", "wip:po", "size:m", "needs-rework:code-review"] },
+    });
+    const item = makeProjectItem({ issueNumber: 1000, labels: client.labelsByIssue.get(1000)! });
+    const agent = makeAgentConfig({});  // developer
+
+    await runPreDispatchPrep([{ agent, item }], client);
+
+    const stripped = client.removeLabelCalls.map(c => c.label);
+    // Developer's own pipeline label stripped.
+    assert.ok(stripped.includes("ready:developer"));
+    // Other agents' pipeline labels PRESERVED (the load-bearing invariant).
+    assert.ok(!stripped.includes("error:architect"), "other agent's error label must survive (human-actionable signal)");
+    assert.ok(!stripped.includes("wip:po"), "other agent's wip label must survive");
+    assert.ok(!stripped.includes("needs-rework:code-review"), "other agent's needs-rework must survive");
+    // Non-pipeline labels left alone.
+    assert.ok(!stripped.includes("size:m"));
+    // wip:developer added.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1000 && c.label === "wip:developer"));
+  });
+
+  test("strips legacy `ready-for-review` and `needs-rework` (no suffix) labels", async () => {
+    const client = new MockGitHubClient({
+      labels: { 1001: ["ready-for-review", "needs-rework", "size:s"] },
+    });
+    const item = makeProjectItem({ issueNumber: 1001, labels: client.labelsByIssue.get(1001)! });
+    const agent = makeAgentConfig({});
+
+    await runPreDispatchPrep([{ agent, item }], client);
+
+    const stripped = client.removeLabelCalls.map(c => c.label);
+    assert.ok(stripped.includes("ready-for-review"), "legacy label must be stripped");
+    assert.ok(stripped.includes("needs-rework"), "legacy label must be stripped");
+    // wip:developer applied.
+    assert.ok(client.addLabelCalls.some(c => c.label === "wip:developer"));
+  });
+
+  test("multi-candidate prep is sequential (stable ordering, no interleaving in the recorded calls)", async () => {
+    // Sequential ordering matters because two candidates on different
+    // tickets shouldn't race for prep. Sequential by design — the for-loop
+    // awaits each iteration before the next.
+    const client = new MockGitHubClient({
+      labels: { 1002: ["ready:developer"], 1003: ["ready:architect"] },
+    });
+    const candidates = [
+      { agent: makeAgentConfig({}), item: makeProjectItem({ issueNumber: 1002, labels: ["ready:developer"] }) },
+      { agent: makeAgentConfig({ name: "architect", column: "In Architecture", claudeMdPath: "architect/CLAUDE.md" }), item: makeProjectItem({ issueNumber: 1003, labels: ["ready:architect"] }) },
+    ];
+
+    await runPreDispatchPrep(candidates, client);
+
+    // Sequential ordering: all of 1002's ops happen before any of 1003's.
+    // Find the index of the first call referencing each issue and assert
+    // ordering between them.
+    const calls1002 = client.addLabelCalls.findIndex(c => c.issueNumber === 1002);
+    const calls1003 = client.addLabelCalls.findIndex(c => c.issueNumber === 1003);
+    assert.ok(calls1002 >= 0 && calls1003 >= 0);
+    assert.ok(calls1002 < calls1003, "first candidate's wip-add must precede second candidate's");
+
+    // Each candidate got the right wip label.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1002 && c.label === "wip:developer"));
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1003 && c.label === "wip:architect"));
+  });
+});
+
+// =====================================================================
+// runConcurrentDispatches
+// =====================================================================
+//
+// 4 tests for the Promise.allSettled wrapper that drives the cycle's
+// concurrent dispatch. Both per-dispatch isolation AND the wip:<agent>
+// finally-block discipline are tested.
+
+describe("runConcurrentDispatches", () => {
+  test("two candidates → both dispatched, both wip:<agent> stripped after completion", async () => {
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 1100: "In Development", 1101: "In Development" },
+      labels: { 1100: ["wip:developer"], 1101: ["wip:developer"] },
+    });
+    const { deps, calls } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/1100": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/1100": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/1101": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/1101": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+    const agent = makeAgentConfig({});
+    const candidates = [
+      { agent, item: makeProjectItem({ issueNumber: 1100 }) },
+      { agent, item: makeProjectItem({ issueNumber: 1101 }) },
+    ];
+
+    const results = await runConcurrentDispatches(candidates, client, deps);
+
+    // Both promises fulfilled.
+    assert.equal(results.length, 2);
+    assert.ok(results.every(r => r.status === "fulfilled"));
+
+    // Each ticket's wip:developer was stripped (finally-block ran).
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1100 && c.label === "wip:developer"));
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1101 && c.label === "wip:developer"));
+
+    // Both dispatches completed (stream invoked twice).
+    assert.equal(calls.claudeStreams, 2);
+  });
+
+  test("one dispatch's uncaught throw → other still completes, both wip:<agent> stripped (Promise.allSettled isolation)", async () => {
+    // Force one dispatch to throw OUT of dispatchToAgent. The catch-all
+    // inside the per-promise async fn in runConcurrentDispatches catches
+    // it (logs to console.error). The other dispatch completes normally.
+    // The load-bearing invariant: BOTH wip labels still get stripped
+    // (each dispatch's finally runs independently), even when one
+    // dispatch's promise rejected internally before being caught.
+    //
+    // To force the throw: make notifyDiscord (called from
+    // handleDispatchError, NOT inside a try/catch on its last line)
+    // throw. The chain: streaming errors → handleAgentResultErrors throws
+    // → outer catch → handleDispatchError → its trailing notifyDiscord
+    // throws → dispatchToAgent rejects.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 1102: "In Development", 1103: "In Development" },
+      labels: { 1102: ["wip:developer"], 1103: ["wip:developer"] },
+    });
+    const { deps } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/1102": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/1102": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify feature/1103": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/1103": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+      // 1102 errors mid-stream; 1103 succeeds.
+      streamResult: (opts) => opts?.cwd?.includes("developer-1102")
+        ? streamResult({ isError: true, terminalReason: "api_error", output: "anthropic 529" })
+        : streamResult({ isError: false, output: "ok" }),
+    });
+    // Make notifyDiscord throw — only matters for 1102's failure path.
+    const customDeps: DispatchDeps = {
+      ...deps,
+      notifyDiscord: async () => { throw new Error("Discord webhook 5xx"); },
+    };
+    const agent = makeAgentConfig({});
+
+    const results = await runConcurrentDispatches(
+      [
+        { agent, item: makeProjectItem({ issueNumber: 1102 }) },
+        { agent, item: makeProjectItem({ issueNumber: 1103 }) },
+      ],
+      client,
+      customDeps,
+    );
+
+    // Both promises fulfilled — Promise.allSettled isolation holds even
+    // when one dispatch internally rejects.
+    assert.equal(results.length, 2);
+    assert.ok(results.every(r => r.status === "fulfilled"),
+      `expected both fulfilled; got ${JSON.stringify(results.map(r => r.status))}`);
+
+    // Both wip:developer stripped — the finally block ran for BOTH
+    // dispatches even though one threw mid-flight. This is the
+    // load-bearing per-dispatch isolation.
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1102 && c.label === "wip:developer"),
+      "1102's wip must be stripped despite its dispatch throwing");
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1103 && c.label === "wip:developer"),
+      "1103's wip must be stripped (sibling of the throwing dispatch)");
+  });
+
+  test("empty candidates → no dispatch, no error", async () => {
+    const client = new MockGitHubClient();
+    const { deps, calls } = makeMockDeps({});
+
+    const results = await runConcurrentDispatches([], client, deps);
+
+    assert.equal(results.length, 0);
+    assert.equal(calls.claudeStreams, 0);
+    assert.equal(client.removeLabelCalls.length, 0);
+  });
+
+  test("wip-removal failure in finally is silently swallowed (doesn't reject the outer promise)", async () => {
+    // The `try { await client.removeLabel(...) } catch {}` in the
+    // finally is the safety net: even if the GitHub API rejects the
+    // wip-strip, the per-promise async fn must still resolve. Otherwise
+    // a transient API failure on cleanup would propagate as a rejection,
+    // and even Promise.allSettled would record it as such.
+    const claudeMd = claudeMdAbsPath("developer/CLAUDE.md");
+    const client = new MockGitHubClient({
+      status: { 1104: "In Development" },
+      labels: { 1104: ["wip:developer"] },
+    });
+    // Function-form failure: only fails when removing the wip:developer
+    // label specifically (so internal removeLabel calls during dispatch
+    // don't trigger it).
+    client.failures.removeLabel = (issueNumber, label) =>
+      issueNumber === 1104 && label === "wip:developer"
+        ? new Error("REST 503")
+        : null;
+    const { deps } = makeMockDeps({
+      execImpls: {
+        "git rev-parse --verify feature/1104": () => execError({ stderr: "fatal" }),
+        "git rev-parse --verify origin/feature/1104": () => execError({ stderr: "fatal" }),
+        "git status --porcelain": () => "",
+        "git rev-list --count main..": () => "1\n",
+      },
+      fsMap: { [claudeMd]: "developer system prompt" },
+    });
+    const agent = makeAgentConfig({});
+
+    const results = await runConcurrentDispatches(
+      [{ agent, item: makeProjectItem({ issueNumber: 1104 }) }],
+      client,
+      deps,
+    );
+
+    // The promise still fulfilled despite the finally's removeLabel throwing.
+    assert.equal(results.length, 1);
+    assert.equal(results[0]!.status, "fulfilled");
+    // The attempted wip removal was recorded (failed, but attempted).
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 1104 && c.label === "wip:developer"));
+  });
+});
