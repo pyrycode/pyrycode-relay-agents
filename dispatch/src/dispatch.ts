@@ -1833,6 +1833,31 @@ export async function runAutoMerge(
           } catch (labelErr: any) {
             console.warn(`   ⚠️  Failed to label/comment merge conflict on #${item.issueNumber}: ${labelErr.message ?? labelErr}`);
           }
+          // Roll Status back from Done → In Code Review. Without this,
+          // the ticket sits at Status=Done with a still-open PR, breaking
+          // the column-as-truth invariant. The 2026-05-09 morning batch
+          // (#214 + #218) hit this: both moved to Done by `runAutoAdvance`'s
+          // `ready:documentation` advance BEFORE the auto-merge attempted
+          // and failed on conflict. Manual recovery moved them back, but
+          // a future stale-conflict can recur silently.
+          //
+          // In its own try/catch — failure is non-fatal because the label
+          // is the load-bearing signal (blocks re-dispatch via
+          // GLOBAL_BLOCK_LABELS). Status drift is cosmetic; surface the
+          // failure so operators see drift.
+          //
+          // "In Code Review" is the natural rollback target — a conflict
+          // means the PR can't merge against current main, which is
+          // exactly the state code-review re-evaluates after a rebase.
+          // Hardcoded today; if pyrycode forks ever rename their
+          // pre-Done column, this becomes config (out of scope until
+          // observed).
+          try {
+            await client.updateItemStatus(item.id, "In Code Review");
+            console.log(`   📋 Rolled #${item.issueNumber} Status back to In Code Review (was Done; PR conflicts)`);
+          } catch (statusErr: any) {
+            console.warn(`   ⚠️  Failed to roll #${item.issueNumber} Status back to In Code Review: ${statusErr?.message ?? statusErr}`);
+          }
           continue;
         }
         // Non-conflict failure (transient network, auth, etc.): silently retry next cycle.

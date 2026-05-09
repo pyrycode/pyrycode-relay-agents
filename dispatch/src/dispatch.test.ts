@@ -2535,10 +2535,10 @@ describe("runAutoMerge", () => {
     assert.ok(!client.addLabelCalls.some(c => c.label === "error:merge-conflict"));
   });
 
-  test("merge conflict → error:merge-conflict label + triage comment + Discord notify (no retry-loop)", async () => {
+  test("merge conflict → error:merge-conflict label + triage comment + Discord notify + Status rolled back to In Code Review", async () => {
     const client = new MockGitHubClient({
       items: [
-        { issueNumber: 1201, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
+        { id: "PVTI_1201", issueNumber: 1201, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
       ],
     });
     const { deps, calls } = makeMockDeps({
@@ -2568,6 +2568,51 @@ describe("runAutoMerge", () => {
     // Pipeline labels NOT stripped (the merge failed, so the ticket
     // isn't really done; labels stay until human resolves).
     assert.ok(!client.removeLabelCalls.some(c => c.issueNumber === 1201));
+    // Status rolled back from Done → In Code Review (the column-as-truth
+    // fix shipped 2026-05-09 evening). Without this the ticket sits at
+    // Status=Done with a still-open conflicting PR — exact bug #218 hit
+    // this morning.
+    assert.deepEqual(
+      client.updateItemStatusCalls,
+      [{ itemId: "PVTI_1201", newStatus: "In Code Review" }],
+      "merge-conflict path must roll Status back from Done → In Code Review",
+    );
+    // Items map reflects the rollback (state actually changed, not just recorded).
+    assert.equal(client.itemsByIssueNumber.get(1201)!.status, "In Code Review");
+  });
+
+  test("merge conflict — Status rollback failure is non-fatal (label still applied, sibling items still process)", async () => {
+    // The Status-rollback updateItemStatus is wrapped in its own
+    // try/catch — failure must not block the label/comment/Discord
+    // path or the loop's `continue` to the next item. Label is the
+    // load-bearing signal (blocks re-dispatch via GLOBAL_BLOCK_LABELS);
+    // Status is cosmetic correctness.
+    const client = new MockGitHubClient({
+      items: [
+        { id: "PVTI_1207", issueNumber: 1207, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
+        { id: "PVTI_1208", issueNumber: 1208, status: "Done", labels: ["ready:documentation"], state: "OPEN" },
+      ],
+    });
+    // Rollback fails for 1207 only; 1208 should still process normally.
+    client.failures.updateItemStatus = (itemId) =>
+      itemId === "PVTI_1207" ? new Error("project field permission denied") : null;
+    const { deps } = makeMockDeps({
+      execImpls: {
+        "gh pr list --head \"feature/1207\"": () => "791\n",
+        "gh pr list --head \"feature/1208\"": () => "792\n",
+        "gh pr merge 791 --merge --delete-branch": () => execError({ stderr: "is not mergeable" }),
+        "gh pr merge 792 --merge --delete-branch": () => execError({ stderr: "is not mergeable" }),
+      },
+    });
+
+    await runAutoMerge(client, deps);
+
+    // Both items got labeled despite 1207's Status rollback failing.
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1207 && c.label === "error:merge-conflict"));
+    assert.ok(client.addLabelCalls.some(c => c.issueNumber === 1208 && c.label === "error:merge-conflict"));
+    // 1207's Status stayed Done (rollback failed); 1208's rolled back successfully.
+    assert.equal(client.itemsByIssueNumber.get(1207)!.status, "Done");
+    assert.equal(client.itemsByIssueNumber.get(1208)!.status, "In Code Review");
   });
 
   test("skip cases — merged label, error:merge-conflict label, issueNumber=0 → no gh pr list invoked", async () => {
