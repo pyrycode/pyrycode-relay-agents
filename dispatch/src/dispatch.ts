@@ -477,9 +477,11 @@ async function attemptSaferSalvage(opts: {
   agent: AgentConfig;
   item: ProjectItem;
   streamResult: StreamResult;
-  client: GitHubProjectClient;
+  client: DispatchClient;
   logFile: string;
+  deps: DispatchDeps;
 }): Promise<boolean> {
+  const { execSync, spawnSync, notifyDiscord } = opts.deps;
   try {
     const dirty = execSync(`git status --porcelain`, {
       cwd: opts.agentCwd, encoding: "utf-8", timeout: 15_000,
@@ -618,15 +620,72 @@ async function attemptSaferSalvage(opts: {
   }
 }
 
+// Subset of `GitHubProjectClient` that the dispatcher's phase functions
+// actually use. Declaring it as an interface (rather than threading the
+// concrete class through) makes the dependency surface explicit and lets
+// `dispatch.test.ts` pass a hand-rolled mock without `as any` casting.
+// Mirrors the `ReconcileClient` pattern in `reconcile.ts`.
+export interface DispatchClient {
+  addLabel(issueNumber: number, label: string): Promise<void>;
+  removeLabel(issueNumber: number, label: string): Promise<void>;
+  addComment(issueNumber: number, body: string): Promise<void>;
+  getIssueLabels(issueNumber: number): Promise<string[]>;
+  getItemStatus(issueNumber: number, options?: { forceRefresh?: boolean }): Promise<string | null>;
+}
+
+// IO surface every phase function depends on. Threading it through
+// `DispatchContext.deps` lets `dispatch.test.ts` swap in mocks per
+// test (recording execSync invocations, faking spawn results, etc.)
+// without `mock.module()` gymnastics or process-level monkeypatching.
+//
+// Production call sites stay close to today's shape — the only
+// difference is the destructure line at the top of each phase. No
+// semantic change vs. pre-DI; existing 234 tests pass unchanged.
+//
+// Boundary: the high-level helpers (`runClaudeStreaming`,
+// `notifyDiscord`, `buildPromptForAgent`) are in deps; the low-level
+// fs/child_process primitives are also in deps so phase functions can
+// be tested at the granularity of "did we issue the right git command".
+// `attemptSaferSalvage` accepts deps as part of its opts (called from
+// `handleAgentResultErrors`).
+export type DispatchDeps = {
+  // child_process
+  execSync: typeof execSync;
+  spawnSync: typeof spawnSync;
+  // fs (only the calls dispatch.ts uses)
+  existsSync: typeof existsSync;
+  readFileSync: typeof readFileSync;
+  writeFileSync: typeof writeFileSync;
+  mkdirSync: typeof mkdirSync;
+  symlinkSync: typeof symlinkSync;
+  // dispatch-internal
+  runClaudeStreaming: typeof runClaudeStreaming;
+  notifyDiscord: (msg: string) => Promise<void>;
+  buildPromptForAgent: typeof buildPromptForAgent;
+};
+
+export const DEFAULT_DEPS: DispatchDeps = {
+  execSync,
+  spawnSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  symlinkSync,
+  runClaudeStreaming,
+  notifyDiscord,
+  buildPromptForAgent,
+};
+
 // Per-dispatch state, computed once at the start of dispatchToAgent and
 // threaded through every phase function. Module-level constants
 // (repoRoot, agentsRepoRoot, __dirname, LOGS_DIR) stay as closures —
 // they don't vary per dispatch and threading them through would just
 // add noise.
-type DispatchContext = {
+export type DispatchContext = {
   agent: AgentConfig;
   item: ProjectItem;
-  client: GitHubProjectClient;
+  client: DispatchClient;
   branchName: string;
   worktreeDir: string;
   useWorktree: boolean;
@@ -634,12 +693,14 @@ type DispatchContext = {
   logFile: string;
   startTime: number;
   startTs: string;
+  deps: DispatchDeps;
 };
 
-function makeDispatchContext(
+export function makeDispatchContext(
   agent: AgentConfig,
   item: ProjectItem,
-  client: GitHubProjectClient,
+  client: DispatchClient,
+  deps: DispatchDeps = DEFAULT_DEPS,
 ): DispatchContext {
   const branchName = `feature/${item.issueNumber}`;
   // Main repo NEVER checks out the feature branch — avoids orphaned untracked
@@ -659,6 +720,7 @@ function makeDispatchContext(
     logFile: agentLogPath(agent.name, item.issueNumber),
     startTime: Date.now(),
     startTs: new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+    deps,
   };
 }
 
@@ -669,12 +731,13 @@ function makeDispatchContext(
 // human triage; today's behavior). Same for `handlePostRun` returning
 // `{ ok: false }` from inside the try block — push-failure and
 // empty-branch-guard preserve the worktree on purpose.
-async function dispatchToAgent(
+export async function dispatchToAgent(
   agent: AgentConfig,
   item: ProjectItem,
-  client: GitHubProjectClient,
+  client: DispatchClient,
+  deps: DispatchDeps = DEFAULT_DEPS,
 ): Promise<void> {
-  const ctx = makeDispatchContext(agent, item, client);
+  const ctx = makeDispatchContext(agent, item, client, deps);
   console.log(`\n[${ctx.startTs}] 🚀 Dispatching #${item.issueNumber} to ${agent.name}`);
   console.log(`   Title: ${item.title}`);
 
@@ -689,7 +752,7 @@ async function dispatchToAgent(
   let streamResult: StreamResult | null = null;
   let saferSalvaged = false;
   try {
-    streamResult = await runClaudeStreaming(spawn.config);
+    streamResult = await ctx.deps.runClaudeStreaming(spawn.config);
     saferSalvaged = await handleAgentResultErrors(streamResult, ctx);
     const postRun = await handlePostRun(streamResult, ctx, saferSalvaged);
     if (!postRun.ok) return;
@@ -705,12 +768,13 @@ async function dispatchToAgent(
 // session-id resume hint is the load-bearing piece for JSONL-replay
 // recovery — preserve verbatim. Issue-0 (manual dispatch) skips the
 // label/comment side effects.
-async function handleDispatchError(
+export async function handleDispatchError(
   error: any,
   ctx: DispatchContext,
   streamResult: StreamResult | null,
 ): Promise<void> {
   const { agent, item, client, logFile, startTime } = ctx;
+  const { notifyDiscord } = ctx.deps;
   const sessionId = streamResult?.sessionId || "unknown";
   const sessionHint = sessionId !== "unknown"
     ? `\nSession: ${sessionId} (resume with: claude --resume ${sessionId})`
@@ -749,10 +813,11 @@ async function handleDispatchError(
 // merge-conflict path explicitly cleans up its own worktree before
 // returning because it just succeeded creating it; other failure
 // paths predate worktree creation so there's nothing to clean.
-async function setupBranchAndWorktree(
+export async function setupBranchAndWorktree(
   ctx: DispatchContext,
 ): Promise<{ ok: true } | { ok: false }> {
   const { agent, item, client, branchName, worktreeDir, useWorktree } = ctx;
+  const { execSync, mkdirSync, symlinkSync, existsSync } = ctx.deps;
 
   // PO and issue-0 (manual dispatch) run on main — just pull latest
   if (!useWorktree) {
@@ -987,10 +1052,11 @@ type SpawnConfig = Parameters<typeof runClaudeStreaming>[0];
 // cleanup happens here too so dispatchToAgent's early-return doesn't
 // leak the worktree (the post-try cleanup at end of dispatchToAgent
 // would NOT run on this early-return path).
-async function prepareAgentSpawn(
+export async function prepareAgentSpawn(
   ctx: DispatchContext,
 ): Promise<{ ok: true; config: SpawnConfig } | { ok: false }> {
   const { agent, item, client, agentCwd, useWorktree, worktreeDir, branchName, logFile } = ctx;
+  const { execSync, readFileSync, writeFileSync, buildPromptForAgent } = ctx.deps;
 
   // Build prompt AFTER worktree creation so specs are read from the feature branch
   const prompt = await buildPromptForAgent(agent, item, agentCwd);
@@ -1103,13 +1169,14 @@ async function prepareAgentSpawn(
 // If neither path applies, throws to the outer catch handler. Path
 // order matters: the PR-already-exists check has to run first because
 // the safer-salvage path explicitly skips drafts.
-async function handleAgentResultErrors(
+export async function handleAgentResultErrors(
   streamResult: StreamResult,
   ctx: DispatchContext,
 ): Promise<boolean> {
   if (!streamResult.isError) return false;
 
   const { agent, item, client, agentCwd, useWorktree, branchName, logFile } = ctx;
+  const { execSync } = ctx.deps;
   let salvaged = false;
   let saferSalvaged = false;
 
@@ -1162,6 +1229,7 @@ async function handleAgentResultErrors(
     const ok = await attemptSaferSalvage({
       agentCwd, branchName, agent, item,
       streamResult, client, logFile,
+      deps: ctx.deps,
     });
     if (ok) {
       saferSalvaged = true;
@@ -1187,12 +1255,13 @@ async function handleAgentResultErrors(
 // paths. The orchestrator treats that as an early-return that DELIBERATELY
 // skips cleanupAfterDispatch — those paths preserve the worktree as
 // evidence for human triage. Today's behavior; preserve verbatim.
-async function handlePostRun(
+export async function handlePostRun(
   streamResult: StreamResult,
   ctx: DispatchContext,
   saferSalvaged: boolean,
 ): Promise<{ ok: true } | { ok: false }> {
   const { agent, item, client, agentCwd, useWorktree, branchName, logFile, startTime } = ctx;
+  const { execSync, spawnSync, notifyDiscord } = ctx.deps;
 
   const output = streamResult.output;
   const u = streamResult.usage;
@@ -1438,8 +1507,9 @@ async function handlePostRun(
 // from early-returns inside dispatchToAgent's try block — those
 // paths (push failure, empty-branch guard) deliberately preserve
 // the worktree as evidence for human triage.
-async function cleanupAfterDispatch(ctx: DispatchContext): Promise<void> {
+export async function cleanupAfterDispatch(ctx: DispatchContext): Promise<void> {
   const { useWorktree, worktreeDir } = ctx;
+  const { execSync } = ctx.deps;
 
   // Clean up worktree (always, even on error)
   if (useWorktree) {
