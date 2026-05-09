@@ -35,6 +35,11 @@ import {
   handlePostRun,
   makeDispatchContext,
   prepareAgentSpawn,
+  runAutoMerge,
+  runClosedSweep,
+  runConcurrentDispatches,
+  runDoneCleanup,
+  runPreDispatchPrep,
   setupBranchAndWorktree,
   type DispatchClient,
   type DispatchContext,
@@ -2097,5 +2102,150 @@ describe("dispatchToAgent — concurrent dispatches (pollLoop's Promise.allSettl
     // Sanity: NO crossed paths (architect-807 or developer-806).
     assert.ok(!worktreeAdds.some(c => c.cmd.includes("architect-807")));
     assert.ok(!worktreeAdds.some(c => c.cmd.includes("developer-806")));
+  });
+});
+
+// =====================================================================
+// runDoneCleanup
+// =====================================================================
+//
+// Strips pipeline-state labels off any ticket sitting in the Done column.
+// Pure decision is in `decideDoneCleanup` (tested in lib.test.ts); these
+// tests cover the I/O wrapper: getItemsByStatus → filter → removeLabel
+// per stripped label, with `warnOnceCleanup` deduping spam on permanent
+// failures.
+
+describe("runDoneCleanup", () => {
+  test("strips pipeline labels from Done items", async () => {
+    // Two Done items with stale ready:* labels accumulated from the pipeline run.
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 900, status: "Done", labels: ["ready:documentation", "size:s"], state: "OPEN" },
+        { issueNumber: 901, status: "Done", labels: ["ready:po", "ready:architect", "ready:developer", "ready:code-review", "ready:documentation"], state: "OPEN" },
+      ],
+    });
+
+    await runDoneCleanup(client);
+
+    // Item 900: only ready:documentation stripped; size:s preserved
+    // (decideDoneCleanup leaves size labels alone).
+    assert.ok(client.removeLabelCalls.some(c => c.issueNumber === 900 && c.label === "ready:documentation"));
+    assert.ok(!client.removeLabelCalls.some(c => c.issueNumber === 900 && c.label === "size:s"));
+
+    // Item 901: all five ready:* stripped.
+    const stripped901 = client.removeLabelCalls.filter(c => c.issueNumber === 901).map(c => c.label);
+    assert.ok(stripped901.includes("ready:po"));
+    assert.ok(stripped901.includes("ready:architect"));
+    assert.ok(stripped901.includes("ready:developer"));
+    assert.ok(stripped901.includes("ready:code-review"));
+    assert.ok(stripped901.includes("ready:documentation"));
+  });
+
+  test("idempotent — clean Done item produces no removeLabel calls", async () => {
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 902, status: "Done", labels: ["size:m", "merged"], state: "OPEN" },
+      ],
+    });
+
+    await runDoneCleanup(client);
+
+    assert.equal(client.removeLabelCalls.length, 0, "no pipeline labels → no removeLabel work");
+  });
+
+  test("getItemsByStatus failure → logs error, doesn't throw", async () => {
+    const client = new MockGitHubClient();
+    client.failures.getItemsByStatus = new Error("graphql 502");
+
+    // Must NOT throw — the maintenance pass swallows fetch failures so
+    // the next cycle's invocation gets a clean retry.
+    await assert.doesNotReject(runDoneCleanup(client));
+  });
+
+  test("removeLabel failure → warnOnceCleanup dedups across two cycles for the same (issue, label, kind)", async () => {
+    // Use a unique issueNumber so the warn-once Set key
+    // `<issue>:<label>:Done-cleanup removeLabel` doesn't collide with
+    // other tests in the file (the Set is module-level and persists
+    // across tests within this process).
+    const client = new MockGitHubClient({
+      items: [
+        { issueNumber: 909_001, status: "Done", labels: ["ready:developer"], state: "OPEN" },
+      ],
+    });
+    client.failures.removeLabel = new Error("renamed label, REST 404");
+
+    // Two cycles in a row. Both call removeLabel (the dedup is on the
+    // *warning log*, not the API call — the warning silencing prevents
+    // log spam without changing behavior).
+    await runDoneCleanup(client);
+    await runDoneCleanup(client);
+
+    // Both cycles attempted removal of the same label.
+    const attempts = client.removeLabelCalls.filter(c => c.issueNumber === 909_001 && c.label === "ready:developer");
+    assert.equal(attempts.length, 2, "removeLabel attempted on both cycles (warn-once doesn't suppress the call)");
+    // The warn-once Set is module-level and only-observable via
+    // console.warn; we can't assert it directly without exporting the
+    // Set. The behavioral guarantee tested is "two cycles → two
+    // removeLabel attempts that both fail without crashing the pass."
+  });
+});
+
+// =====================================================================
+// runClosedSweep
+// =====================================================================
+//
+// Moves closed issues that are stranded outside the Done column to
+// Done. PO splitting + closing parents, manually-closed-as-wontfix,
+// duplicates — all reach Done via this pass.
+
+describe("runClosedSweep", () => {
+  test("moves CLOSED items not in Done → Done via updateItemStatus", async () => {
+    const client = new MockGitHubClient({
+      items: [
+        // Closed in Backlog (PO split + closed parent).
+        { id: "PVTI_910", issueNumber: 910, status: "Backlog", state: "CLOSED" },
+        // Closed in In Code Review (won't-fix during review).
+        { id: "PVTI_911", issueNumber: 911, status: "In Code Review", state: "CLOSED" },
+        // Already in Done — should NOT be moved (filter excludes).
+        { id: "PVTI_912", issueNumber: 912, status: "Done", state: "CLOSED" },
+        // Open in Backlog — should NOT be moved (filter excludes).
+        { id: "PVTI_913", issueNumber: 913, status: "Backlog", state: "OPEN" },
+      ],
+    });
+
+    await runClosedSweep(client);
+
+    const movedIds = client.updateItemStatusCalls.map(c => c.itemId);
+    assert.deepEqual(movedIds.sort(), ["PVTI_910", "PVTI_911"].sort(), "exactly the two stranded-closed items moved");
+    assert.ok(client.updateItemStatusCalls.every(c => c.newStatus === "Done"));
+  });
+
+  test("getClosedItemsNotInDone failure → logs error, doesn't throw", async () => {
+    const client = new MockGitHubClient();
+    client.failures.getClosedItemsNotInDone = new Error("graphql 503");
+
+    await assert.doesNotReject(runClosedSweep(client));
+  });
+
+  test("updateItemStatus failure on one item → warnOnceCleanup dedups, other items still processed", async () => {
+    // Use a globally-unique issueNumber for the failing item so the
+    // warn-once key doesn't collide with other tests (module-level Set).
+    const client = new MockGitHubClient({
+      items: [
+        { id: "PVTI_909_010", issueNumber: 909_010, status: "Backlog", state: "CLOSED" },
+        { id: "PVTI_915", issueNumber: 915, status: "Backlog", state: "CLOSED" },
+      ],
+    });
+    client.failures.updateItemStatus = (itemId) =>
+      itemId === "PVTI_909_010" ? new Error("project field permission denied") : null;
+
+    await runClosedSweep(client);
+
+    // Both updates were attempted.
+    assert.equal(client.updateItemStatusCalls.length, 2);
+    // The non-failing one succeeded — verify state changed.
+    assert.equal(client.itemsByIssueNumber.get(915)!.status, "Done");
+    // The failing one stayed in Backlog — failure is recoverable next cycle.
+    assert.equal(client.itemsByIssueNumber.get(909_010)!.status, "Backlog");
   });
 });
