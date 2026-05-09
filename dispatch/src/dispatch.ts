@@ -1321,6 +1321,17 @@ async function dispatchToAgent(
     await notifyDiscord(`❌ **${agent.name}** failed on #${item.issueNumber}: ${item.title}\n${item.url}\nManual intervention required.`);
   }
 
+  await cleanupAfterDispatch(ctx);
+}
+
+// Worktree + main-repo cleanup that runs after every dispatch
+// (success OR error path through the outer try/catch). NOT reached
+// from early-returns inside dispatchToAgent's try block — those
+// paths (push failure, empty-branch guard) deliberately preserve
+// the worktree as evidence for human triage.
+async function cleanupAfterDispatch(ctx: DispatchContext): Promise<void> {
+  const { useWorktree, worktreeDir } = ctx;
+
   // Clean up worktree (always, even on error)
   if (useWorktree) {
     try {
