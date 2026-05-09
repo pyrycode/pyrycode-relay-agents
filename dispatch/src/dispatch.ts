@@ -672,225 +672,8 @@ async function dispatchToAgent(
   console.log(`\n[${startTs}] 🚀 Dispatching #${item.issueNumber} to ${agent.name}`);
   console.log(`   Title: ${item.title}`);
 
-  // --- Branch + worktree setup ---
-
-  // PO and issue-0 (manual dispatch) run on main — just pull latest
-  if (!useWorktree) {
-    try {
-      execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe" });
-    } catch (e) {
-      console.warn(`   ⚠️  Failed to update main: ${e}`);
-    }
-  } else {
-    // Pull latest main and fetch remote branches
-    try {
-      execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe" });
-      execSync(`git fetch origin`, { cwd: repoRoot, stdio: "pipe" });
-    } catch (e) {
-      console.error(`   ⚠️  Failed to update main: ${e}`);
-      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to update main branch. Manual intervention required.\n\n\`\`\`\n${e}\n\`\`\``);
-      try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
-      return;
-    }
-
-    // Create/update the feature branch ref WITHOUT checking it out in the main repo.
-    // Origin is the source of truth — if local is behind, fast-forward; if local has
-    // commits not in origin, that's an integrity error (prior dispatch failed to push)
-    // and requires human triage. See `decideBranchSetup` in lib.ts for the matrix.
-    const localExists = (() => {
-      try {
-        execSync(`git rev-parse --verify ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-        return true;
-      } catch { return false; }
-    })();
-    const remoteExists = (() => {
-      try {
-        execSync(`git rev-parse --verify origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-        return true;
-      } catch { return false; }
-    })();
-
-    let localEqualsOrigin: boolean | undefined;
-    let localIsAncestorOfOrigin: boolean | undefined;
-    let localSha = "";
-    let originSha = "";
-    if (localExists && remoteExists) {
-      try {
-        localSha = execSync(`git rev-parse ${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
-        originSha = execSync(`git rev-parse origin/${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
-        localEqualsOrigin = localSha === originSha;
-        if (!localEqualsOrigin) {
-          // `git merge-base --is-ancestor A B` exits 0 if A is an ancestor of B.
-          try {
-            execSync(`git merge-base --is-ancestor ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-            localIsAncestorOfOrigin = true;
-          } catch {
-            localIsAncestorOfOrigin = false;
-          }
-        }
-      } catch (e) {
-        // Couldn't compute SHAs — defensive defaults make decideBranchSetup abort.
-        console.warn(`   ⚠️  Failed to compare ${branchName} with origin/${branchName}: ${e}`);
-      }
-    }
-
-    const branchAction = decideBranchSetup({
-      localExists,
-      remoteExists,
-      localEqualsOrigin,
-      localIsAncestorOfOrigin,
-    });
-
-    try {
-      switch (branchAction) {
-        case "create-from-main":
-          execSync(`git branch ${branchName} main`, { cwd: repoRoot, stdio: "pipe" });
-          console.log(`   🌿 Created branch ${branchName} from main`);
-          break;
-        case "create-from-origin":
-          execSync(`git branch ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-          console.log(`   📌 Recovered branch ${branchName} from origin`);
-          break;
-        case "reuse-local-no-remote":
-          console.log(`   📌 Reusing local branch ${branchName} (no remote yet)`);
-          break;
-        case "reuse-local-already-synced":
-          console.log(`   📌 Reusing local branch ${branchName} (already at origin)`);
-          break;
-        case "fast-forward-from-origin":
-          execSync(`git branch -f ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-          console.log(`   🚀 Fast-forwarded local ${branchName} to origin/${branchName}`);
-          break;
-        case "abort-local-ahead-of-origin": {
-          const msg = `Local \`${branchName}\` has commits not present on origin/${branchName}. A prior dispatch likely failed to push and we didn't notice. Manual triage required: decide whether to push the missing commits or discard them, then strip \`error:${agent.name}\` to retry.`;
-          console.error(`   ❌ ${msg}`);
-
-          // Capture the diverged commits inline so the operator doesn't
-          // need SSH access to the dispatcher machine to diagnose. Cap
-          // the listing at 30 entries / 2KB so a runaway local branch
-          // doesn't bloat the issue comment. (review #18)
-          let divergedSummary = "";
-          try {
-            const log = execSync(
-              `git log --oneline -n 30 origin/${branchName}..${branchName}`,
-              { cwd: repoRoot, encoding: "utf-8", timeout: 15_000 },
-            ).trim();
-            if (log) {
-              const truncated = log.length > 2000 ? log.slice(0, 2000) + "\n…(truncated)" : log;
-              divergedSummary =
-                `\n\n**Diverged commits** (local has, origin/${branchName} doesn't):\n` +
-                "```\n" + truncated + "\n```\n";
-            }
-          } catch (e: any) {
-            divergedSummary = `\n\n_(could not capture diverged commits: ${e?.message ?? e})_`;
-          }
-
-          const shaInfo = (localSha && originSha)
-            ? `\n\n- Local SHA: \`${localSha}\`\n- Origin SHA: \`${originSha}\``
-            : "";
-
-          await client.addComment(
-            item.issueNumber,
-            `## ⚠️ Dispatch Error: ${agent.name}\n\n${msg}${shaInfo}${divergedSummary}`,
-          );
-          try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
-          return;
-        }
-      }
-    } catch (e) {
-      console.error(`   ❌ Git branch setup failed: ${e}`);
-      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to set up branch \`${branchName}\` (action: ${branchAction}). Manual intervention required.\n\n\`\`\`\n${e}\n\`\`\``);
-      try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
-      return;
-    }
-
-    // Create worktree from the feature branch
-    try {
-      // Clean up stale worktree at the SAME path (previous failed run with
-      // matching agent prefix).
-      try {
-        execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" });
-      } catch {}
-
-      // Clean up orphan worktrees checked out at the SAME BRANCH under a
-      // different path. `git worktree add` fails with "fatal: '<branch>' is
-      // already checked out at '<other-path>'" otherwise. This happens when
-      // a previous cycle's cleanup execSync at lines ~985-991 was swallowed
-      // (permissions, lockfile contention) — the orphan blocks all future
-      // dispatches on this branch with error:<agent> until a human steps in.
-      // Prune first to drop dead refs (worktree dir was removed but git's
-      // metadata still references it), then force-remove anything still
-      // matching the branch.
-      try {
-        execSync(`git worktree prune`, { cwd: repoRoot, stdio: "pipe" });
-        const porcelain = execSync(`git worktree list --porcelain`, {
-          cwd: repoRoot, encoding: "utf-8", timeout: 15_000,
-        });
-        for (const orphanPath of findWorktreesForBranch(porcelain, branchName)) {
-          if (orphanPath === worktreeDir) continue; // already removed above
-          try {
-            execSync(`git worktree remove --force "${orphanPath}"`, { cwd: repoRoot, stdio: "pipe" });
-            console.log(`   🧹 Removed orphan worktree ${orphanPath} (branch ${branchName})`);
-          } catch (e) {
-            console.warn(`   ⚠️  Failed to remove orphan worktree ${orphanPath}: ${e}`);
-          }
-        }
-      } catch (e) {
-        console.warn(`   ⚠️  Failed to inspect worktrees for ${branchName}: ${e}`);
-      }
-
-      mkdirSync(resolve(repoRoot, `../.pyrycode-worktrees`), { recursive: true });
-      execSync(`git worktree add "${worktreeDir}" ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
-      console.log(`   🌳 Created worktree at ${worktreeDir}`);
-
-      // Symlink the canonical repo's codegraph index into the worktree.
-      // `.codegraph/` is gitignored and lives outside `.git/`, so
-      // `git worktree add` won't bring it across — without this link,
-      // agents that try `mcp__codegraph__*` tools find an empty index
-      // (the codegraph MCP server reads from CWD = worktree dir),
-      // silently fall through to grep, and pay tokens for the codegraph
-      // tool surface without getting any of its value. See
-      // `decideCodegraphSymlink` in lib.ts for the decision rules.
-      const codegraphSrc = resolve(repoRoot, ".codegraph");
-      const codegraphDst = resolve(worktreeDir, ".codegraph");
-      const cgDecision = decideCodegraphSymlink({
-        sourceExists: existsSync(codegraphSrc),
-        destExists: existsSync(codegraphDst),
-      });
-      if (cgDecision.action === "symlink") {
-        try {
-          symlinkSync(codegraphSrc, codegraphDst);
-          console.log(`   🔗 Linked .codegraph/ from canonical repo`);
-        } catch (e) {
-          // Soft-fail: don't abort dispatch over a broken symlink.
-          // Agent runs without codegraph this cycle; operator sees the
-          // warning and can investigate (permission issue, races, etc).
-          console.warn(`   ⚠️  Failed to symlink .codegraph/ into worktree: ${e}`);
-        }
-      } else if (cgDecision.reason === "no-source") {
-        console.warn(`   ⚠️  Canonical .codegraph/ index missing at ${codegraphSrc} — agents in this worktree will fall through to grep when they call codegraph_*. Run \`codegraph init -i\` in the repo root to bootstrap.`);
-      }
-    } catch (e) {
-      console.error(`   ❌ Failed to create worktree: ${e}`);
-      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to create git worktree.\n\n\`\`\`\n${e}\n\`\`\``);
-      try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
-      return;
-    }
-
-    // Merge main into the feature branch INSIDE the worktree (not in the main repo)
-    try {
-      execSync(`git merge main --no-edit`, { cwd: worktreeDir, stdio: "pipe" });
-      console.log(`   🔀 Merged main into ${branchName} (in worktree)`);
-    } catch (e) {
-      try { execSync(`git merge --abort`, { cwd: worktreeDir, stdio: "pipe" }); } catch {}
-      console.error(`   ❌ Merge conflict merging main into ${branchName}: ${e}`);
-      await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nMerge conflict on branch \`${branchName}\` when merging main. Manual resolution required.\n\n\`\`\`\n${e}\n\`\`\``);
-      try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
-      // Clean up the worktree since we're bailing
-      try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" }); } catch {}
-      return;
-    }
-  }
+  const setup = await setupBranchAndWorktree(ctx);
+  if (!setup.ok) return;
 
   const spawn = await prepareAgentSpawn(ctx);
   if (!spawn.ok) return;
@@ -952,6 +735,244 @@ async function handleDispatchError(
     } catch {}
   }
   await notifyDiscord(`❌ **${agent.name}** failed on #${item.issueNumber}: ${item.title}\n${item.url}\nManual intervention required.`);
+}
+
+// Branch + worktree setup. Six early-return points, each applying
+// `error:<agent>` label + comment before returning {ok:false}. PO and
+// issue-0 (manual dispatch) skip the worktree path — they just `git
+// checkout main && git pull` and continue.
+//
+// Important: when this returns {ok:false}, the orchestrator skips
+// cleanupAfterDispatch — these failure paths preserve the worktree
+// (when one was even created) as evidence for human triage. The
+// merge-conflict path explicitly cleans up its own worktree before
+// returning because it just succeeded creating it; other failure
+// paths predate worktree creation so there's nothing to clean.
+async function setupBranchAndWorktree(
+  ctx: DispatchContext,
+): Promise<{ ok: true } | { ok: false }> {
+  const { agent, item, client, branchName, worktreeDir, useWorktree } = ctx;
+
+  // PO and issue-0 (manual dispatch) run on main — just pull latest
+  if (!useWorktree) {
+    try {
+      execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe" });
+    } catch (e) {
+      console.warn(`   ⚠️  Failed to update main: ${e}`);
+    }
+    return { ok: true };
+  }
+
+  // Pull latest main and fetch remote branches
+  try {
+    execSync(`git checkout main && git pull`, { cwd: repoRoot, stdio: "pipe" });
+    execSync(`git fetch origin`, { cwd: repoRoot, stdio: "pipe" });
+  } catch (e) {
+    console.error(`   ⚠️  Failed to update main: ${e}`);
+    await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to update main branch. Manual intervention required.\n\n\`\`\`\n${e}\n\`\`\``);
+    try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
+    return { ok: false };
+  }
+
+  // Create/update the feature branch ref WITHOUT checking it out in the main repo.
+  // Origin is the source of truth — if local is behind, fast-forward; if local has
+  // commits not in origin, that's an integrity error (prior dispatch failed to push)
+  // and requires human triage. See `decideBranchSetup` in lib.ts for the matrix.
+  const localExists = (() => {
+    try {
+      execSync(`git rev-parse --verify ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+      return true;
+    } catch { return false; }
+  })();
+  const remoteExists = (() => {
+    try {
+      execSync(`git rev-parse --verify origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+      return true;
+    } catch { return false; }
+  })();
+
+  let localEqualsOrigin: boolean | undefined;
+  let localIsAncestorOfOrigin: boolean | undefined;
+  let localSha = "";
+  let originSha = "";
+  if (localExists && remoteExists) {
+    try {
+      localSha = execSync(`git rev-parse ${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
+      originSha = execSync(`git rev-parse origin/${branchName}`, { cwd: repoRoot, encoding: "utf-8" }).trim();
+      localEqualsOrigin = localSha === originSha;
+      if (!localEqualsOrigin) {
+        // `git merge-base --is-ancestor A B` exits 0 if A is an ancestor of B.
+        try {
+          execSync(`git merge-base --is-ancestor ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+          localIsAncestorOfOrigin = true;
+        } catch {
+          localIsAncestorOfOrigin = false;
+        }
+      }
+    } catch (e) {
+      // Couldn't compute SHAs — defensive defaults make decideBranchSetup abort.
+      console.warn(`   ⚠️  Failed to compare ${branchName} with origin/${branchName}: ${e}`);
+    }
+  }
+
+  const branchAction = decideBranchSetup({
+    localExists,
+    remoteExists,
+    localEqualsOrigin,
+    localIsAncestorOfOrigin,
+  });
+
+  try {
+    switch (branchAction) {
+      case "create-from-main":
+        execSync(`git branch ${branchName} main`, { cwd: repoRoot, stdio: "pipe" });
+        console.log(`   🌿 Created branch ${branchName} from main`);
+        break;
+      case "create-from-origin":
+        execSync(`git branch ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+        console.log(`   📌 Recovered branch ${branchName} from origin`);
+        break;
+      case "reuse-local-no-remote":
+        console.log(`   📌 Reusing local branch ${branchName} (no remote yet)`);
+        break;
+      case "reuse-local-already-synced":
+        console.log(`   📌 Reusing local branch ${branchName} (already at origin)`);
+        break;
+      case "fast-forward-from-origin":
+        execSync(`git branch -f ${branchName} origin/${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+        console.log(`   🚀 Fast-forwarded local ${branchName} to origin/${branchName}`);
+        break;
+      case "abort-local-ahead-of-origin": {
+        const msg = `Local \`${branchName}\` has commits not present on origin/${branchName}. A prior dispatch likely failed to push and we didn't notice. Manual triage required: decide whether to push the missing commits or discard them, then strip \`error:${agent.name}\` to retry.`;
+        console.error(`   ❌ ${msg}`);
+
+        // Capture the diverged commits inline so the operator doesn't
+        // need SSH access to the dispatcher machine to diagnose. Cap
+        // the listing at 30 entries / 2KB so a runaway local branch
+        // doesn't bloat the issue comment. (review #18)
+        let divergedSummary = "";
+        try {
+          const log = execSync(
+            `git log --oneline -n 30 origin/${branchName}..${branchName}`,
+            { cwd: repoRoot, encoding: "utf-8", timeout: 15_000 },
+          ).trim();
+          if (log) {
+            const truncated = log.length > 2000 ? log.slice(0, 2000) + "\n…(truncated)" : log;
+            divergedSummary =
+              `\n\n**Diverged commits** (local has, origin/${branchName} doesn't):\n` +
+              "```\n" + truncated + "\n```\n";
+          }
+        } catch (e: any) {
+          divergedSummary = `\n\n_(could not capture diverged commits: ${e?.message ?? e})_`;
+        }
+
+        const shaInfo = (localSha && originSha)
+          ? `\n\n- Local SHA: \`${localSha}\`\n- Origin SHA: \`${originSha}\``
+          : "";
+
+        await client.addComment(
+          item.issueNumber,
+          `## ⚠️ Dispatch Error: ${agent.name}\n\n${msg}${shaInfo}${divergedSummary}`,
+        );
+        try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
+        return { ok: false };
+      }
+    }
+  } catch (e) {
+    console.error(`   ❌ Git branch setup failed: ${e}`);
+    await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to set up branch \`${branchName}\` (action: ${branchAction}). Manual intervention required.\n\n\`\`\`\n${e}\n\`\`\``);
+    try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
+    return { ok: false };
+  }
+
+  // Create worktree from the feature branch
+  try {
+    // Clean up stale worktree at the SAME path (previous failed run with
+    // matching agent prefix).
+    try {
+      execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" });
+    } catch {}
+
+    // Clean up orphan worktrees checked out at the SAME BRANCH under a
+    // different path. `git worktree add` fails with "fatal: '<branch>' is
+    // already checked out at '<other-path>'" otherwise. This happens when
+    // a previous cycle's cleanup execSync at lines ~985-991 was swallowed
+    // (permissions, lockfile contention) — the orphan blocks all future
+    // dispatches on this branch with error:<agent> until a human steps in.
+    // Prune first to drop dead refs (worktree dir was removed but git's
+    // metadata still references it), then force-remove anything still
+    // matching the branch.
+    try {
+      execSync(`git worktree prune`, { cwd: repoRoot, stdio: "pipe" });
+      const porcelain = execSync(`git worktree list --porcelain`, {
+        cwd: repoRoot, encoding: "utf-8", timeout: 15_000,
+      });
+      for (const orphanPath of findWorktreesForBranch(porcelain, branchName)) {
+        if (orphanPath === worktreeDir) continue; // already removed above
+        try {
+          execSync(`git worktree remove --force "${orphanPath}"`, { cwd: repoRoot, stdio: "pipe" });
+          console.log(`   🧹 Removed orphan worktree ${orphanPath} (branch ${branchName})`);
+        } catch (e) {
+          console.warn(`   ⚠️  Failed to remove orphan worktree ${orphanPath}: ${e}`);
+        }
+      }
+    } catch (e) {
+      console.warn(`   ⚠️  Failed to inspect worktrees for ${branchName}: ${e}`);
+    }
+
+    mkdirSync(resolve(repoRoot, `../.pyrycode-worktrees`), { recursive: true });
+    execSync(`git worktree add "${worktreeDir}" ${branchName}`, { cwd: repoRoot, stdio: "pipe" });
+    console.log(`   🌳 Created worktree at ${worktreeDir}`);
+
+    // Symlink the canonical repo's codegraph index into the worktree.
+    // `.codegraph/` is gitignored and lives outside `.git/`, so
+    // `git worktree add` won't bring it across — without this link,
+    // agents that try `mcp__codegraph__*` tools find an empty index
+    // (the codegraph MCP server reads from CWD = worktree dir),
+    // silently fall through to grep, and pay tokens for the codegraph
+    // tool surface without getting any of its value. See
+    // `decideCodegraphSymlink` in lib.ts for the decision rules.
+    const codegraphSrc = resolve(repoRoot, ".codegraph");
+    const codegraphDst = resolve(worktreeDir, ".codegraph");
+    const cgDecision = decideCodegraphSymlink({
+      sourceExists: existsSync(codegraphSrc),
+      destExists: existsSync(codegraphDst),
+    });
+    if (cgDecision.action === "symlink") {
+      try {
+        symlinkSync(codegraphSrc, codegraphDst);
+        console.log(`   🔗 Linked .codegraph/ from canonical repo`);
+      } catch (e) {
+        // Soft-fail: don't abort dispatch over a broken symlink.
+        // Agent runs without codegraph this cycle; operator sees the
+        // warning and can investigate (permission issue, races, etc).
+        console.warn(`   ⚠️  Failed to symlink .codegraph/ into worktree: ${e}`);
+      }
+    } else if (cgDecision.reason === "no-source") {
+      console.warn(`   ⚠️  Canonical .codegraph/ index missing at ${codegraphSrc} — agents in this worktree will fall through to grep when they call codegraph_*. Run \`codegraph init -i\` in the repo root to bootstrap.`);
+    }
+  } catch (e) {
+    console.error(`   ❌ Failed to create worktree: ${e}`);
+    await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nFailed to create git worktree.\n\n\`\`\`\n${e}\n\`\`\``);
+    try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
+    return { ok: false };
+  }
+
+  // Merge main into the feature branch INSIDE the worktree (not in the main repo)
+  try {
+    execSync(`git merge main --no-edit`, { cwd: worktreeDir, stdio: "pipe" });
+    console.log(`   🔀 Merged main into ${branchName} (in worktree)`);
+  } catch (e) {
+    try { execSync(`git merge --abort`, { cwd: worktreeDir, stdio: "pipe" }); } catch {}
+    console.error(`   ❌ Merge conflict merging main into ${branchName}: ${e}`);
+    await client.addComment(item.issueNumber, `## ⚠️ Dispatch Error: ${agent.name}\n\nMerge conflict on branch \`${branchName}\` when merging main. Manual resolution required.\n\n\`\`\`\n${e}\n\`\`\``);
+    try { await client.addLabel(item.issueNumber, `error:${agent.name}`); } catch {}
+    // Clean up the worktree since we're bailing
+    try { execSync(`git worktree remove --force "${worktreeDir}"`, { cwd: repoRoot, stdio: "pipe" }); } catch {}
+    return { ok: false };
+  }
+
+  return { ok: true };
 }
 
 type SpawnConfig = Parameters<typeof runClaudeStreaming>[0];
