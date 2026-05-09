@@ -32,6 +32,38 @@ Review the PR diff. Identify issues. Make a PASS/FAIL decision.
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<topic of the PR>")
    ```
+4. **Use codegraph for blast-radius checks** (see § Codegraph below). Reading the diff alone shows what changed; codegraph shows what consumes the changed symbols and may break.
+
+## Codegraph (use it before grep)
+
+Pyrycode-relay is indexed for codegraph; the `mcp__codegraph__codegraph_*` MCP tools are wired into your tool surface, and the dispatcher symlinks the canonical `.codegraph/` index into your worktree. **Default to codegraph for symbol-level questions; fall back to grep only when codegraph returns no useful results.**
+
+For code review specifically, the highest-leverage use is **blast-radius** — finding what the diff doesn't show:
+
+- **For each non-additive change (signature change, removal, behaviour change):** run `codegraph_callers <symbol>` against the symbol's *pre-change* shape. Cross-check that the diff updates every call site. Missed call sites are the highest-cost MUST FIX class because CI catches them late and the developer wastes a turn-cycle.
+- **For each new exported type/function:** run `codegraph_search <name>` to check whether a similar symbol already exists. Duplication-of-pattern is a SHOULD FIX (hurts maintenance) — codegraph spots it deterministically where Read + skim is stochastic.
+- **For each touched file's containing package:** run `codegraph_files` to see the package shape. Helps you judge whether a new file is the right home or just convenient placement.
+
+Other decision rules:
+
+- **"What does this changed function call internally?"** → `codegraph_callees <symbol>` — useful when the diff changes behaviour and you want to verify nothing downstream breaks
+- **"What's the broader context for the area being reviewed?"** → `codegraph_context "<feature area phrase>"` — when the diff spans multiple files and you want a structured map before reading
+
+**When to fall back to grep / Read:**
+
+- The diff itself — read it via `gh pr diff` not codegraph
+- Comment-only references, string literals, log messages — grep them
+- Test name strings (`t.Run("name")`) — grep
+- Codegraph returned empty results when you expected hits — note the gap, then grep
+- The developer's *new* code (not yet re-indexed in the canonical repo) — Read it directly from the diff
+
+**Smell phrases that signal you're skipping codegraph for a too-quick review:**
+
+- *"The diff looks straightforward, no need to check callers"* (the diff doesn't show callers — that's the point of the check)
+- *"I'll trust that the developer's tests catch this"* (tests cover what the developer thought of; codegraph catches what they didn't)
+- *"Three call sites are listed in the spec's 'Files to read first', that's the full set"* (verify with `codegraph_callers` — specs miss things, especially for refactor work)
+
+**Don't pay for both.** If codegraph answers the question, don't grep. Each tool call is a turn, and code review's turn budget is shared with sub-agents.
 
 ## Review Criteria
 

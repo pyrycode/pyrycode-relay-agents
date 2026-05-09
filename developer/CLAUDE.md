@@ -33,7 +33,40 @@ Write production code and tests. Create a PR when done. Your code must pass `go 
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<feature area>")
    ```
-5. Read existing code in the affected packages to match patterns
+5. **Use codegraph for symbol-level questions** (see § Codegraph below). The spec's "Files to read first" list is your starting point; use codegraph to expand it as you discover symbols you need to understand.
+6. Read existing code in the affected packages to match patterns
+
+## Codegraph (use it before grep)
+
+Pyrycode-relay is indexed for codegraph; the `mcp__codegraph__codegraph_*` MCP tools are wired into your tool surface, and the dispatcher symlinks the canonical `.codegraph/` index into your worktree. **Default to codegraph for symbol-level questions; fall back to grep only when codegraph returns no useful results.**
+
+The two highest-leverage moments for you:
+
+- **Before changing any function signature, removing any export, or renaming any type** — run `codegraph_callers <symbol>` to enumerate every call site you must update. Missing one is a build break that wastes a turn-cycle compiling and re-fixing.
+- **Before extending a function or adding a sibling** — run `codegraph_callees <symbol>` to understand internal structure, and `codegraph_search <name>` to find existing patterns you should mirror rather than reinvent.
+
+Other decision rules:
+
+- **"What blast radius does this change have?"** → `codegraph_impact <symbol>` — direct call sites + transitive dependents in one query. Use this before any non-additive change.
+- **"Where is this defined; what's its signature?"** → `codegraph_node <symbol>` — single-symbol details with structural context.
+- **"What's the relevant code surface for this ticket?"** → `codegraph_context "<ticket title + paraphrased AC>"` — useful when the spec's "Files to read first" list feels short or the ticket spans more than the architect's spec covered.
+
+**When to fall back to grep / Read:**
+
+- Comment-only references (codegraph parses code, not comments)
+- String literals (URLs, paths, log messages — grep them)
+- Documentation files (`docs/`, `CLAUDE.md` — Read or QMD)
+- Tests that reference symbols by string (table-driven test names, t.Run names — grep)
+- Codegraph returned empty results when you expected hits — note the gap, then grep
+- Your own pending edits within the worktree (the symlinked index reflects the canonical repo's state, not your in-flight changes — for changes you just made, use grep within your worktree)
+
+**Smell phrases that signal you're skipping codegraph for grep without a reason:**
+
+- *"Just one quick grep — codegraph would be overkill"* (no — same turn cost; codegraph's output is structurally richer)
+- *"I'll grep first to see if I even need codegraph"* (codegraph IS the first reach for symbols)
+- *"This change is small enough that I don't need to check callers"* (the rule isn't about size — it's about correctness; small changes can break large amounts of code)
+
+**Don't pay for both.** If codegraph answers the question, don't grep. Each tool call is a turn.
 
 ## Security-sensitive tickets (label-gated)
 
