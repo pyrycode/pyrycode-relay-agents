@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   handleAgentResultErrors,
+  handlePostRun,
   makeDispatchContext,
   prepareAgentSpawn,
   setupBranchAndWorktree,
@@ -1113,5 +1114,312 @@ describe("handleAgentResultErrors", () => {
     // for max_turns; same for safer-salvage).
     assert.equal(calls.exec.filter(c => c.cmd.includes("gh pr list")).length, 0);
     assert.equal(calls.exec.filter(c => c.cmd.includes("git status")).length, 0);
+  });
+});
+
+// =====================================================================
+// handlePostRun
+// =====================================================================
+//
+// 10 tests covering the post-success side-effect chain:
+// - Push failure (the 2026-05-07 #155 lineage) and empty-branch guard
+//   (the 2026-05-08 relay #5 incident) — both return {ok:false} and
+//   DELIBERATELY skip cleanupAfterDispatch (worktree preserved as
+//   evidence). Today's behavior; preserve verbatim.
+// - decidePostRunLabels integration (4 logKind branches): ready,
+//   rework, moved-out, status-unknown.
+// - saferSalvaged invariant: when true, post-success labeling +
+//   success comment + success Discord all suppressed.
+// - Legacy `needs-rework` strip path.
+
+const STREAM_OK = (): StreamResult => streamResult({
+  output: "agent finished cleanly",
+  isError: false,
+  numTurns: 30,
+  totalCostUsd: 1.23,
+  durationMs: 60_000,
+  usage: { input_tokens: 100, output_tokens: 200 },
+});
+
+describe("handlePostRun — failure modes", () => {
+  test("push fails (non-fast-forward) → error:<agent> label + comment + {ok:false}", async () => {
+    // The 2026-05-07 #155 lineage: code-review on stale worktree,
+    // verdict failed, tried to push review comments, hit non-fast-forward
+    // because someone pushed out-of-band during the run. Pre-fix the
+    // dispatcher swallowed the push failure and continued to apply
+    // ready:code-review + auto-advance.
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 400 },
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",  // clean → no auto-commit
+          "git push -u origin": () => execError({
+            stderr: "! [rejected]        feature/400 -> feature/400 (non-fast-forward)",
+          }),
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 400, label: "error:developer" }]);
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /git push/);
+    assert.match(client.comments[0]!.body, /non-fast-forward/);
+    // Crucially: no `ready:developer` was applied. Push success is the
+    // precondition for treating the agent's verdict as canonical.
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+  });
+
+  test("empty branch + agent-produces-commits → error:<agent> label + comment + {ok:false}", async () => {
+    // The 2026-05-08 relay #5 incident: agent did the right thing
+    // prose-wise (refused to act without prereqs) but produced 0
+    // commits — dispatcher had no deterministic check that the prose
+    // matched the branch state. The empty-branch guard is the
+    // deterministic backstop.
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 401 },
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          // push succeeds, but the branch is 0 ahead of main.
+          "git rev-list --count main..": () => "0\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: false });
+    assert.deepEqual(client.addLabelCalls, [{ issueNumber: 401, label: "error:developer" }]);
+    assert.match(client.comments[0]!.body, /produced no commits/);
+    assert.match(client.comments[0]!.body, /0 commits ahead of/);
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+  });
+
+  test("empty branch + saferSalvaged=true → guard skipped, no error label, salvage stays canonical", async () => {
+    // The salvage-doesn't-fire-empty-branch invariant: salvage already
+    // labeled error:max_turns_salvaged and opened a draft PR with
+    // whatever WIP existed. The guard would falsely fire on a 0-ahead
+    // branch otherwise, replacing the salvage label with error:<agent>
+    // and breaking the global block.
+    const { ctx, client } = makeTestContext({
+      item: { issueNumber: 402 },
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "0\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, /* saferSalvaged */ true);
+
+    assert.deepEqual(result, { ok: true });
+    // Crucially: NO error:developer applied even though branch is 0 ahead.
+    assert.ok(!client.addLabelCalls.some(c => c.label === "error:developer"));
+    // Post-success labeling is also gated on !saferSalvaged → no ready label.
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+  });
+
+  test("empty branch + agent-doesn't-produce-commits (code-review) → guard skipped via shouldFlagEmptyBranch", async () => {
+    // code-review uses a worktree (reads code locally to review) but
+    // its output is PR comments via `gh pr review` — never commits.
+    // Empty branch on code-review is expected; guard must not fire.
+    const client = new MockGitHubClient({
+      status: { 403: "In Code Review" },
+      labels: { 403: [] },
+    });
+    const { ctx } = makeTestContext({
+      agent: { name: "code-review", column: "In Code Review", claudeMdPath: "code-review/CLAUDE.md", usesWorktree: true, producesCommits: false },
+      item: { issueNumber: 403 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "0\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true }, "code-review with 0 commits is the expected case");
+    assert.ok(!client.addLabelCalls.some(c => c.label === "error:code-review"));
+    // Code-review still gets ready:code-review (the agent's column hasn't moved).
+    assert.ok(client.addLabelCalls.some(c => c.label === "ready:code-review"));
+  });
+});
+
+describe("handlePostRun — decidePostRunLabels integration", () => {
+  test("addReadyLabel=true (happy path) → ready:<agent> + completion comment + success Discord notify", async () => {
+    const client = new MockGitHubClient({
+      status: { 410: "In Development" },     // matches developer.column
+      labels: { 410: [] },                   // no rework target
+    });
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 410 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "1\n",  // 1 commit, not empty
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(client.addLabelCalls.some(c => c.label === "ready:developer"));
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /completed work on this ticket/);
+    assert.match(client.comments[0]!.body, /Ready for human review/);
+    // Success Discord notify (one message, "✅" prefix).
+    assert.equal(calls.discord.length, 1);
+    assert.match(calls.discord[0]!, /^✅/);
+  });
+
+  test("logKind=rework → no ready label, rework comment, no success Discord", async () => {
+    const client = new MockGitHubClient({
+      status: { 411: "In Development" },
+      labels: { 411: ["needs-rework:po"] },  // explicit rework target
+    });
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 411 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "1\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true });
+    // No `ready:developer` (rework target wins per shouldAddReadyLabel).
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+    assert.equal(client.comments.length, 1);
+    assert.match(client.comments[0]!.body, /rework by \*\*po\*\*/);
+    assert.match(client.comments[0]!.body, /Needs rework by po/);
+    // Success notify still fires (it's gated on !saferSalvaged, not rework).
+    // But content describes rework, not success — that's a side-effect of
+    // the existing dispatch.ts wiring; just assert one notify happened.
+    assert.equal(calls.discord.length, 1);
+  });
+
+  test("logKind=moved-out → agent moved ticket out of column, no ready label, no rework comment", async () => {
+    // PO splitting parent → moves ticket to Done. addReadyLabel=false
+    // because currentColumn !== agentColumn. logKind=moved-out.
+    const client = new MockGitHubClient({
+      status: { 412: "Done" },               // PO moved it
+      labels: { 412: [] },
+    });
+    const { ctx } = makeTestContext({
+      agent: { name: "po", column: "Backlog", claudeMdPath: "po/CLAUDE.md", usesWorktree: false, producesCommits: false },
+      item: { issueNumber: 412 },
+      client,
+      // PO has useWorktree=false → no git push / empty-branch ops to mock.
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:po"),
+      "moved-out path must not apply ready:<agent>");
+    // Comment still posted (the success-with-output comment), but no
+    // rework framing.
+    assert.equal(client.comments.length, 1);
+    assert.ok(!/Needs rework by/.test(client.comments[0]!.body));
+  });
+
+  test("logKind=status-unknown (getItemStatus throws) → no ready label, no error", async () => {
+    const client = new MockGitHubClient({
+      labels: { 413: [] },
+      // status omitted → getItemStatus returns null by default
+      defaultStatus: null,
+    });
+    client.failures.getItemStatus = new Error("graphql 503");
+    const { ctx } = makeTestContext({
+      item: { issueNumber: 413 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "1\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true }, "post-run must not throw on getItemStatus failure");
+    // Cautious default: skip ready:<agent> when we can't confirm the column.
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"));
+  });
+});
+
+describe("handlePostRun — coverage edges", () => {
+  test("saferSalvaged=true suppresses ready label + success comment + success Discord notify", async () => {
+    // The salvage-doesn't-auto-advance invariant. attemptSaferSalvage
+    // already labeled error:max_turns_salvaged + opened a draft PR +
+    // posted its own salvage comment + sent its own Discord notify.
+    // handlePostRun must not re-emit any of those signals as success.
+    const client = new MockGitHubClient({
+      status: { 420: "In Development" },
+      labels: { 420: ["error:max_turns_salvaged"] },
+    });
+    const { ctx, calls } = makeTestContext({
+      item: { issueNumber: 420 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "0\n",  // salvage may not have produced commits
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, /* saferSalvaged */ true);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(!client.addLabelCalls.some(c => c.label === "ready:developer"),
+      "salvage path must not apply ready:<agent>");
+    // No success comment (the post-success block is gated on !saferSalvaged).
+    assert.equal(client.comments.length, 0);
+    // No success Discord notify (also gated on !saferSalvaged).
+    assert.equal(calls.discord.length, 0);
+  });
+
+  test("shouldStripLegacyNeedsRework=true → removeLabel('needs-rework') called", async () => {
+    // Legacy `needs-rework` (no suffix) on the ticket: dispatcher's
+    // pre-prefix-scheme semantics treats it as "this agent's work
+    // needs rework by this same agent". decidePostRunLabels flags
+    // shouldStripLegacyNeedsRework so the caller cleans it up.
+    const client = new MockGitHubClient({
+      status: { 421: "In Development" },
+      labels: { 421: ["needs-rework"] },     // legacy form
+    });
+    const { ctx } = makeTestContext({
+      item: { issueNumber: 421 },
+      client,
+      mockOptions: {
+        execImpls: {
+          "git status --porcelain": () => "",
+          "git rev-list --count main..": () => "1\n",
+        },
+      },
+    });
+
+    const result = await handlePostRun(STREAM_OK(), ctx, false);
+
+    assert.deepEqual(result, { ok: true });
+    assert.ok(
+      client.removeLabelCalls.some(c => c.issueNumber === 421 && c.label === "needs-rework"),
+      "legacy needs-rework must be stripped",
+    );
   });
 });
