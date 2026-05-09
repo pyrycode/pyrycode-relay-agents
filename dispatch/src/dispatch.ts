@@ -905,72 +905,7 @@ async function dispatchToAgent(
   let saferSalvaged = false;
   try {
     streamResult = await runClaudeStreaming(spawn.config);
-
-    // Claude CLI can complete but report an error (e.g., max_turns reached, API error).
-    // Special case: if the agent hit max_turns but already created a PR, treat as success.
-    // The agent likely finished the work and ran out of turns on cleanup (todo updates, etc.).
-    if (streamResult.isError) {
-      let salvaged = false;
-      if (streamResult.terminalReason === "max_turns" && item.issueNumber > 0) {
-        // Query both number AND isDraft so we can skip drafts. Drafts are
-        // typically the safer-salvage helper's own output (partial work
-        // awaiting human triage); treating them as "agent finished, just
-        // out of turns on cleanup" would auto-advance partial work.
-        let prListJson: string | null = null;
-        try {
-          prListJson = execSync(
-            `gh pr list --head "${branchName}" --state open --json number,isDraft`,
-            { cwd: agentCwd, encoding: "utf-8", timeout: 15_000 }
-          );
-        } catch (e: any) {
-          // Distinguish gh-CLI failure from "no PR found." A transient gh
-          // failure (network, auth, rate limit) was previously swallowed
-          // and silently downgraded a possible-success outcome to
-          // `error:<agent>`, costing one human triage cycle. Surface the
-          // gh failure explicitly so the dispatcher log shows what
-          // actually happened — fall through to the error path either
-          // way (the agent did hit max_turns), but the operator now sees
-          // why the PR-existence check couldn't run.
-          const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
-          console.warn(`   ⚠️  gh pr list failed during max_turns salvage check (treating as no-PR): ${detail.slice(0, 300)}`);
-          writeLog(logFile, "SALVAGE_GH_FAILED", `gh pr list errored during salvage check; could not determine PR existence. Detail: ${detail}`);
-        }
-        if (prListJson !== null) {
-          const readyPr = findReadyPrNumber(prListJson);
-          if (readyPr !== null) {
-            console.log(`   ⚠️  Hit max_turns but PR #${readyPr} exists (non-draft) — treating as success`);
-            writeLog(logFile, "SALVAGED", `Agent hit max_turns (${streamResult.numTurns}) but ready PR #${readyPr} was already created. Treating as success.`);
-            salvaged = true;
-          }
-        }
-      }
-
-      // Safer salvage: max_turns + clean vet/build + uncommitted work
-      // → auto-commit, push, open DRAFT PR, label `error:max_turns_salvaged`.
-      // Distinct from the PR-already-exists path above (which treats
-      // max_turns as success). This path preserves work the agent
-      // produced but didn't get to PR-create — keeps it visible while
-      // forcing human triage (no auto-advance via `ready:<agent>`).
-      if (!salvaged
-          && streamResult.terminalReason === "max_turns"
-          && useWorktree
-          && item.issueNumber > 0) {
-        const ok = await attemptSaferSalvage({
-          agentCwd, branchName, agent, item,
-          streamResult, client, logFile,
-        });
-        if (ok) {
-          saferSalvaged = true;
-          salvaged = true;
-        }
-      }
-
-      if (!salvaged) {
-        throw new Error(
-          `Agent error (${streamResult.terminalReason}): ${streamResult.output?.slice(0, 500) || "no output"}`
-        );
-      }
-    }
+    saferSalvaged = await handleAgentResultErrors(streamResult, ctx);
 
     const output = streamResult.output;
     const u = streamResult.usage;
@@ -1361,6 +1296,98 @@ async function prepareAgentSpawn(
       env: { ...scrubSpawnEnv(process.env), CLAUDE_CODE_ENTRYPOINT: agent.name } as NodeJS.ProcessEnv,
     },
   };
+}
+
+// Inspect a stream result that came back with isError set. Two salvage
+// paths are tried in order:
+//
+//   1. PR-already-exists: max_turns + non-draft PR open on the feature
+//      branch → treat as success (the agent likely finished the work
+//      and ran out of turns on cleanup). Returns false (saferSalvaged
+//      stays false; the success path runs as normal).
+//
+//   2. Safer salvage: max_turns + worktree path + clean vet/build +
+//      uncommitted work → auto-commit, push, open DRAFT PR, label
+//      `error:max_turns_salvaged`. Returns true (saferSalvaged) so the
+//      orchestrator suppresses ready:<agent>, success-comment wording,
+//      and the success Discord notify.
+//
+// If neither path applies, throws to the outer catch handler. Path
+// order matters: the PR-already-exists check has to run first because
+// the safer-salvage path explicitly skips drafts.
+async function handleAgentResultErrors(
+  streamResult: StreamResult,
+  ctx: DispatchContext,
+): Promise<boolean> {
+  if (!streamResult.isError) return false;
+
+  const { agent, item, client, agentCwd, useWorktree, branchName, logFile } = ctx;
+  let salvaged = false;
+  let saferSalvaged = false;
+
+  // Special case: if the agent hit max_turns but already created a PR, treat as success.
+  // The agent likely finished the work and ran out of turns on cleanup (todo updates, etc.).
+  if (streamResult.terminalReason === "max_turns" && item.issueNumber > 0) {
+    // Query both number AND isDraft so we can skip drafts. Drafts are
+    // typically the safer-salvage helper's own output (partial work
+    // awaiting human triage); treating them as "agent finished, just
+    // out of turns on cleanup" would auto-advance partial work.
+    let prListJson: string | null = null;
+    try {
+      prListJson = execSync(
+        `gh pr list --head "${branchName}" --state open --json number,isDraft`,
+        { cwd: agentCwd, encoding: "utf-8", timeout: 15_000 }
+      );
+    } catch (e: any) {
+      // Distinguish gh-CLI failure from "no PR found." A transient gh
+      // failure (network, auth, rate limit) was previously swallowed
+      // and silently downgraded a possible-success outcome to
+      // `error:<agent>`, costing one human triage cycle. Surface the
+      // gh failure explicitly so the dispatcher log shows what
+      // actually happened — fall through to the error path either
+      // way (the agent did hit max_turns), but the operator now sees
+      // why the PR-existence check couldn't run.
+      const detail = e?.stderr?.toString?.() ?? e?.message ?? String(e);
+      console.warn(`   ⚠️  gh pr list failed during max_turns salvage check (treating as no-PR): ${detail.slice(0, 300)}`);
+      writeLog(logFile, "SALVAGE_GH_FAILED", `gh pr list errored during salvage check; could not determine PR existence. Detail: ${detail}`);
+    }
+    if (prListJson !== null) {
+      const readyPr = findReadyPrNumber(prListJson);
+      if (readyPr !== null) {
+        console.log(`   ⚠️  Hit max_turns but PR #${readyPr} exists (non-draft) — treating as success`);
+        writeLog(logFile, "SALVAGED", `Agent hit max_turns (${streamResult.numTurns}) but ready PR #${readyPr} was already created. Treating as success.`);
+        salvaged = true;
+      }
+    }
+  }
+
+  // Safer salvage: max_turns + clean vet/build + uncommitted work
+  // → auto-commit, push, open DRAFT PR, label `error:max_turns_salvaged`.
+  // Distinct from the PR-already-exists path above (which treats
+  // max_turns as success). This path preserves work the agent
+  // produced but didn't get to PR-create — keeps it visible while
+  // forcing human triage (no auto-advance via `ready:<agent>`).
+  if (!salvaged
+      && streamResult.terminalReason === "max_turns"
+      && useWorktree
+      && item.issueNumber > 0) {
+    const ok = await attemptSaferSalvage({
+      agentCwd, branchName, agent, item,
+      streamResult, client, logFile,
+    });
+    if (ok) {
+      saferSalvaged = true;
+      salvaged = true;
+    }
+  }
+
+  if (!salvaged) {
+    throw new Error(
+      `Agent error (${streamResult.terminalReason}): ${streamResult.output?.slice(0, 500) || "no output"}`
+    );
+  }
+
+  return saferSalvaged;
 }
 
 // Worktree + main-repo cleanup that runs after every dispatch
