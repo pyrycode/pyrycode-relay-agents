@@ -1,6 +1,12 @@
 #!/bin/sh
 # Start the dispatcher in the foreground.
 # Pass-through any args to pnpm (e.g. `pyry-start --silent`).
+#
+# Refuses to start if another dispatcher is already running against the
+# same target repo (lock file at <TARGET_REPO_PATH>/.dispatcher.lock).
+# Catches both same-fork double-start and cross-fork double-start
+# targeting the same project board. Stale locks (holder PID dead) are
+# cleared automatically.
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -9,6 +15,38 @@ if [ ! -d "$AGENTS_DIR/dispatcher" ]; then
   echo "error: dispatcher submodule missing at $AGENTS_DIR/dispatcher" >&2
   echo "       run: cd $AGENTS_DIR && git submodule update --init" >&2
   exit 1
+fi
+
+# Resolve TARGET_REPO_PATH the same way the dispatcher does at module
+# load: env override first (process env or .env file), fall back to
+# parent of agents/. Mirrors `dispatch.ts`'s `resolveTargetRepoRoot`
+# precedence so the lock file lands at the same path the dispatcher
+# will write logs against.
+if [ -n "$TARGET_REPO_PATH" ]; then
+  RESOLVED_TARGET="$TARGET_REPO_PATH"
+elif [ -f "$AGENTS_DIR/.env" ]; then
+  RESOLVED_TARGET=$(grep '^TARGET_REPO_PATH=' "$AGENTS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+RESOLVED_TARGET="${RESOLVED_TARGET:-$(cd "$AGENTS_DIR/.." && pwd)}"
+LOCK_FILE="$RESOLVED_TARGET/.dispatcher.lock"
+
+# Pre-spawn lock check. If the lock holder's PID is still alive, refuse;
+# the user must drain (or hard-stop) the existing dispatcher first.
+# If the holder is dead (crashed without cleanup), warn + clear the
+# stale lock and proceed.
+if [ -f "$LOCK_FILE" ]; then
+  LOCKED_PID=$(grep '^PID=' "$LOCK_FILE" | head -1 | cut -d= -f2)
+  if [ -n "$LOCKED_PID" ] && kill -0 "$LOCKED_PID" 2>/dev/null; then
+    echo "error: another dispatcher is already running against this target" >&2
+    echo "       lock file: $LOCK_FILE" >&2
+    sed 's/^/       /' "$LOCK_FILE" >&2
+    echo "" >&2
+    echo "       drain it first: bin/pyry-drain (from the agents repo holding the lock)" >&2
+    echo "       or hard-stop:    bin/pyry-stop (releases lock on next pyry-start)" >&2
+    exit 1
+  fi
+  echo "warning: stale lock at $LOCK_FILE (PID $LOCKED_PID dead) — clearing" >&2
+  rm -f "$LOCK_FILE"
 fi
 
 # Keep the submodule's node_modules in sync. Cheap no-op when up to date
@@ -21,4 +59,39 @@ pnpm install --silent
 # artifacts (logs/, .prompt-*.txt, .system-prompt-*.txt) here.
 export AGENTS_REPO_PATH="$AGENTS_DIR"
 
-exec pnpm start "$@"
+# Spawn dispatcher in background so we can capture the actual PID for
+# the lock and clean up on shell exit. `exec` would replace the shell
+# and lose the EXIT trap; we keep the shell alive as a thin lock-holder
+# wrapping the long-lived dispatcher process.
+pnpm start "$@" &
+PNPM_PID=$!
+
+# Find the actual dispatcher node process. pnpm spawns node-running-tsx;
+# pgrep's pattern matches the inner node process, which is what
+# bin/pyry-status / bin/pyry-drain / pkill target. Retry a few times
+# while node is bootstrapping.
+DISPATCHER_PID=""
+i=0
+while [ $i -lt 30 ]; do
+  DISPATCHER_PID=$(pgrep -f "tsx.*src/dispatch-bin\.ts" 2>/dev/null | head -1)
+  [ -n "$DISPATCHER_PID" ] && break
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -z "$DISPATCHER_PID" ] && DISPATCHER_PID="$PNPM_PID"  # fallback
+
+# Write the lock + register cleanup. The trap fires on shell exit
+# (normal completion, SIGTERM, SIGINT) so the lock clears whenever
+# the dispatcher comes down via `bin/pyry-drain` or Ctrl-C. SIGKILL
+# leaves a stale lock; the next pyry-start detects it and clears.
+cat > "$LOCK_FILE" <<EOF
+PID=$DISPATCHER_PID
+AGENTS_REPO_PATH=$AGENTS_DIR
+STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+trap "rm -f '$LOCK_FILE'" EXIT INT TERM
+
+# Block until the dispatcher exits. When pnpm/node terminates (drain,
+# crash, signal), this `wait` returns and the EXIT trap clears the
+# lock.
+wait "$PNPM_PID"
