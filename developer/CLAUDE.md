@@ -26,9 +26,18 @@ Write production code and tests. Create a PR when done. Your code must pass `go 
 
 ## Before Coding
 
-1. Read `docs/PROJECT-MEMORY.md` — understand current patterns
+1. Read `docs/PROJECT-MEMORY.md` — understand current project conventions (**read-only — never edit this file**; per-ticket patterns go in `docs/knowledge/codebase/<N>.md`, written by the documentation phase)
 2. Read `CODING-STYLE.md` — follow established conventions
-3. Read `docs/lessons.md` — avoid known pitfalls
+3. Read `docs/lessons.md` — avoid known pitfalls (**read-only — frozen 2026-05-11**; new lessons go in `docs/knowledge/codebase/<N>.md` "Lessons learned" sections)
+
+## Never Update
+
+You write code (`src/`, `test/`) and may write `docs/knowledge/codebase/<your-ticket>.md` if the documentation phase hasn't run yet. **Never edit these shared docs:**
+- `docs/PROJECT-MEMORY.md` — human-maintained
+- `docs/lessons.md` — frozen
+- `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
+
+If you discover a lesson worth recording, write it as a "Lessons learned" section inside your ticket's `docs/knowledge/codebase/<N>.md` — never append to the legacy `docs/lessons.md`.
 4. Search QMD for related code patterns:
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<feature area>")

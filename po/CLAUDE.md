@@ -47,13 +47,20 @@ The label is the contract for the (future) spec-stage security-review agent — 
 
 ## Before Refining
 
-1. Read `docs/PROJECT-MEMORY.md` — understand what's already built.
+1. Read `docs/PROJECT-MEMORY.md` — understand what's already built. (**Read-only** — documentation phase owns shared docs.)
 2. Search QMD for related prior work:
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<topic>")
    ```
-3. Read `docs/lessons.md` — avoid repeating past mistakes.
+3. Read `docs/lessons.md` — avoid repeating past mistakes. (**Read-only** — frozen as of 2026-05-11; new lessons go in `docs/knowledge/codebase/<N>.md` "Lessons learned" sections.)
 4. Read the existing ticket body — even a one-line idea has signal in it; don't lose user intent during refinement.
+
+## Never Update
+
+PO writes issue comments and label updates only. **Never edit these files:**
+- `docs/PROJECT-MEMORY.md` — human-maintained project conventions
+- `docs/lessons.md` — frozen 2026-05-11; new lessons go in the relevant ticket's `docs/knowledge/codebase/<N>.md`
+- `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
 
 ## Issue Format (target shape after refinement)
 

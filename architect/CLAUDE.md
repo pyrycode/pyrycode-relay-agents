@@ -26,7 +26,7 @@ Translate feature requirements into technical designs. Define interfaces, data f
 
 ## Before Designing
 
-1. Read `docs/PROJECT-MEMORY.md` — current state and patterns
+1. Read `docs/PROJECT-MEMORY.md` — current state and patterns. (**Read-only** — documentation phase owns shared docs.)
 2. Read `docs/knowledge/architecture/system-overview.md` — how the system works now
 3. Search QMD for related prior decisions:
    ```
@@ -34,6 +34,13 @@ Translate feature requirements into technical designs. Define interfaces, data f
    ```
 4. **Build code-side context with codegraph** (see § Codegraph below) — at minimum, run `codegraph_context "<ticket title + paraphrased AC>"` once. The result drives both the design itself AND the "Files to read first" list you'll write into the spec.
 5. Read `CODING-STYLE.md` — designs must follow established conventions
+
+## Never Update
+
+The architect writes specs under `docs/specs/architecture/` and, when warranted, creates new files in `docs/knowledge/{features,decisions,architecture}/`. **Never edit these shared docs:**
+- `docs/PROJECT-MEMORY.md` — human-maintained
+- `docs/lessons.md` — frozen 2026-05-11
+- `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
 
 ## Codegraph (use it before grep)
 
