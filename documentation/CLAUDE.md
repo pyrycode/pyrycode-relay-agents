@@ -59,12 +59,20 @@ If the system design changed:
 
 ## Always Update
 
-1. **`docs/knowledge/codebase/<ticket-number>.md`** — write a NEW per-ticket file with the implementation summary (the bullets that historically went into `PROJECT-MEMORY.md`'s "What's Built" section). One file per ticket; never edit a sibling ticket's file. **Do NOT prepend or append to `PROJECT-MEMORY.md`'s "What's Built" section** — the directory listing of `docs/knowledge/codebase/` IS the index. See `docs/knowledge/codebase/README.md` for the convention. (Pre-2026-05-10 blocks in `PROJECT-MEMORY.md` are frozen history; leave them alone.)
-2. **`docs/knowledge/INDEX.md`** — add one-line summary for any new feature/decision/architecture doc
-3. **`docs/PROJECT-MEMORY.md`** — update "Patterns Established" or other sibling sections if applicable. Leave "What's Built" alone (per item 1).
-4. **`docs/lessons.md`** — add any gotchas discovered during the ticket
+1. **`docs/knowledge/codebase/<ticket-number>.md`** — write a NEW per-ticket file with the implementation summary, patterns established, AND any lessons learned by this ticket. One file per ticket; never edit a sibling ticket's file. The directory listing of `docs/knowledge/codebase/` IS the index — see `docs/knowledge/codebase/README.md` for what belongs in a ticket file.
+2. **`docs/knowledge/INDEX.md`** — add one-line summary for any new feature/decision/architecture doc you created. **You are the ONLY agent that writes here.** Combined with `serial: true` this guarantees no concurrent write conflicts.
 
-The per-ticket-file convention exists because parallel docs agents writing to the same `PROJECT-MEMORY.md` "What's Built" line caused recurring merge conflicts (incidents on 2026-05-09 and 2026-05-10; 5+ stuck PRs). Per-ticket files eliminate the hot line entirely — two concurrent docs runs never touch the same file.
+## Never Update
+
+- **`docs/PROJECT-MEMORY.md`** — human-maintained project conventions. Appending here caused stranded PRs on 2026-05-09, 2026-05-10, and 2026-05-11 (across pyrycode + agent-dispatcher-v2 pipelines); the "Patterns established" section was dropped 2026-05-11 in the v2 project, and the same fix should propagate here. If you find yourself wanting to add a section here, the rule is: it goes in `codebase/<N>.md` instead.
+- **`docs/lessons.md`** — frozen 2026-05-11. Pre-existing content stays as historical reference. **New lessons go into the relevant ticket's `docs/knowledge/codebase/<N>.md`** under a "Lessons learned" section. Splitting lessons per-ticket eliminates the shared-append conflict surface (same fix shape as PROJECT-MEMORY.md).
+- **Pre-2026-05-10 frozen blocks** anywhere in the repo — historical content. Don't touch.
+
+The per-ticket-file convention exists because shared-append docs guarantee merge conflicts when two feature branches add to them on top of a marching-forward main — not just from concurrency, but from any branch that didn't merge before its peers added their entries. Per-ticket files eliminate the hot line entirely.
+
+## Sole-writer guarantee (INDEX.md)
+
+You (and only you) write to `docs/knowledge/INDEX.md`. The other four agents (po, architect, developer, code-review) have explicit "Never update INDEX.md" rules. Combined with the `serial: true` flag on this phase, this means INDEX.md can only be touched by one process at a time. Stale-branch conflicts can still occur if main has moved during your run; if INDEX.md ever conflicts during merge, file a follow-up — the next architectural fix is auto-generation or dispatcher-side pre-doc rebase.
 
 ## Constraints
 

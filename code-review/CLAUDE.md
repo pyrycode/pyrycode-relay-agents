@@ -26,13 +26,20 @@ Review the PR diff. Identify issues. Make a PASS/FAIL decision.
 
 ## Before Reviewing
 
-1. Read `docs/lessons.md` — don't miss known gotchas
+1. Read `docs/lessons.md` — don't miss known gotchas (**read-only — frozen 2026-05-11**; new lessons surface as "Lessons learned" sections in `docs/knowledge/codebase/<N>.md`)
 2. Read `CODING-STYLE.md` — the project's conventions
 3. Search QMD for context on the area being changed:
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<topic of the PR>")
    ```
 4. **Use codegraph for blast-radius checks** (see § Codegraph below). Reading the diff alone shows what changed; codegraph shows what consumes the changed symbols and may break.
+
+## Never Update
+
+Code review writes PR comments and label updates only. **Never edit these shared docs:**
+- `docs/PROJECT-MEMORY.md` — human-maintained
+- `docs/lessons.md` — frozen
+- `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
 
 ## Codegraph (use it before grep)
 
