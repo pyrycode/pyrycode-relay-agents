@@ -1,15 +1,40 @@
 #!/bin/sh
-# Report whether the dispatcher is running, and on which Node binary.
+# Report whether THIS fork's dispatcher is running, and on which Node
+# binary. Looks up the dispatcher via the lock file at
+# <TARGET_REPO_PATH>/.dispatcher.lock (per-fork, scoped).
+#
+# Pre-2026-05-12 versions used a fork-agnostic pgrep that false-positived
+# "running" when ANY fork's dispatcher was alive — documented in
+# Pyrycode/Tooling under the post-2026-05-09 launch convention section.
+#
 # Exit 0 when running, 1 when stopped — usable in scripts.
-PID=$(pgrep -f "tsx.*src/dispatch-bin\.ts" | head -1)
-if [ -z "$PID" ]; then
+SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
+AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve TARGET_REPO_PATH the same way pyry-start does, so we look at
+# the same lock file pyry-start writes.
+if [ -n "$TARGET_REPO_PATH" ]; then
+  RESOLVED_TARGET="$TARGET_REPO_PATH"
+elif [ -f "$AGENTS_DIR/.env" ]; then
+  RESOLVED_TARGET=$(grep '^TARGET_REPO_PATH=' "$AGENTS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+RESOLVED_TARGET="${RESOLVED_TARGET:-$(cd "$AGENTS_DIR/.." && pwd)}"
+LOCK_FILE="$RESOLVED_TARGET/.dispatcher.lock"
+
+if [ ! -f "$LOCK_FILE" ]; then
   echo "stopped"
+  exit 1
+fi
+
+LOCKED_PID=$(grep '^PID=' "$LOCK_FILE" | head -1 | cut -d= -f2)
+if [ -z "$LOCKED_PID" ] || ! kill -0 "$LOCKED_PID" 2>/dev/null; then
+  echo "stopped (stale lock at $LOCK_FILE)"
   exit 1
 fi
 
 # Surface the dispatcher's effective Node path (catches the
 # Homebrew-vs-nvm class of bug from 2026-05-03).
-NODE_BIN=$(ps -o command= -p "$PID" | awk '{print $1}')
-START=$(ps -o lstart= -p "$PID" | sed 's/^ *//')
-echo "running   pid=$PID  started=$START"
+NODE_BIN=$(ps -o command= -p "$LOCKED_PID" | awk '{print $1}')
+START=$(ps -o lstart= -p "$LOCKED_PID" | sed 's/^ *//')
+echo "running   pid=$LOCKED_PID  started=$START"
 echo "          node=$NODE_BIN"

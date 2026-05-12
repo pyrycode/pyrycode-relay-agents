@@ -1,23 +1,47 @@
 #!/bin/sh
-# Graceful restart: drain → wait for the in-flight dispatch to finish → start fresh.
-# Note: a long developer run can make "wait" take 20+ minutes. To force-stop,
-# use `kill <pid>` directly (with the cleanup recipe in Pipeline.md).
+# Graceful restart of THIS fork's dispatcher: drain (via lock file) →
+# wait for the in-flight dispatch to finish → start fresh.
+#
+# Scoped to this fork via the lock file at <TARGET_REPO_PATH>/.dispatcher.lock.
+# Pre-2026-05-12 versions used a fork-agnostic pkill that drained ALL
+# dispatchers on the machine and would not return until ALL were gone.
+#
+# Note: a long developer run can make "wait" take 20+ minutes. To
+# force-stop, use `kill <pid>` directly (PID is in the lock file).
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
+AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if ! pgrep -f "tsx.*src/dispatch-bin\.ts" >/dev/null; then
-  echo "no dispatcher running — starting fresh"
+# Resolve TARGET_REPO_PATH the same way pyry-start does, so we look at
+# the same lock file pyry-start writes.
+if [ -n "$TARGET_REPO_PATH" ]; then
+  RESOLVED_TARGET="$TARGET_REPO_PATH"
+elif [ -f "$AGENTS_DIR/.env" ]; then
+  RESOLVED_TARGET=$(grep '^TARGET_REPO_PATH=' "$AGENTS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+RESOLVED_TARGET="${RESOLVED_TARGET:-$(cd "$AGENTS_DIR/.." && pwd)}"
+LOCK_FILE="$RESOLVED_TARGET/.dispatcher.lock"
+
+if [ ! -f "$LOCK_FILE" ]; then
+  echo "no dispatcher running for this fork — starting fresh"
   exec "$SCRIPT_DIR/pyry-start"
 fi
 
-echo "draining current dispatcher..."
-pkill -TERM -f "tsx.*src/dispatch-bin\.ts"
+LOCKED_PID=$(grep '^PID=' "$LOCK_FILE" | head -1 | cut -d= -f2)
+if [ -z "$LOCKED_PID" ] || ! kill -0 "$LOCKED_PID" 2>/dev/null; then
+  echo "stale lock at $LOCK_FILE — clearing and starting fresh"
+  rm -f "$LOCK_FILE"
+  exec "$SCRIPT_DIR/pyry-start"
+fi
 
-# Poll until process exits. 30 min cap so we don't block forever on a stuck run.
+echo "draining current dispatcher (PID $LOCKED_PID)..."
+kill -TERM "$LOCKED_PID"
+
+# Poll until that specific PID exits. 30 min cap so we don't block forever.
 WAITED=0
-while pgrep -f "tsx.*src/dispatch-bin\.ts" >/dev/null; do
+while kill -0 "$LOCKED_PID" 2>/dev/null; do
   if [ "$WAITED" -ge 1800 ]; then
-    echo "still running after 30 min — bailing. Force-stop with: pkill -KILL -f dispatch-bin.ts"
+    echo "still running after 30 min — bailing. Force-stop with: kill -KILL $LOCKED_PID"
     exit 1
   fi
   sleep 5

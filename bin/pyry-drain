@@ -1,12 +1,48 @@
 #!/bin/sh
-# Send SIGTERM to the running dispatcher → it finishes the current dispatch
-# (whatever agents are in flight complete normally, wip:<agent> labels strip
-# naturally) and exits before starting the next cycle.
+# Send SIGTERM to THIS fork's dispatcher (identified by the lock file at
+# <TARGET_REPO_PATH>/.dispatcher.lock — written by pyry-start). The
+# dispatcher finishes the current dispatch (in-flight agents complete
+# normally, wip:<agent> labels strip naturally) and exits before the
+# next cycle.
 #
-# Idempotent — multiple SIGTERMs only print the drain notice once on the
-# dispatcher side. Safe to run if no dispatcher is up; reports it.
-if pkill -TERM -f "tsx.*src/dispatch-bin\.ts" 2>/dev/null; then
-  echo "drain signal sent — dispatcher will exit after current dispatch completes"
-else
-  echo "no dispatcher running"
+# Scoped to this fork's target — does NOT touch dispatchers running in
+# other agents-fork repos against different targets. Pre-2026-05-12
+# `pkill -f "tsx.*src/dispatch-bin\.ts"` killed every dispatcher process
+# on the machine regardless of which fork the operator ran the script
+# from.
+#
+# Idempotent — safe to run when no dispatcher is up; reports it.
+set -e
+SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
+AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve TARGET_REPO_PATH the same way pyry-start does, so we look at
+# the same lock file pyry-start writes.
+if [ -n "$TARGET_REPO_PATH" ]; then
+  RESOLVED_TARGET="$TARGET_REPO_PATH"
+elif [ -f "$AGENTS_DIR/.env" ]; then
+  RESOLVED_TARGET=$(grep '^TARGET_REPO_PATH=' "$AGENTS_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
 fi
+RESOLVED_TARGET="${RESOLVED_TARGET:-$(cd "$AGENTS_DIR/.." && pwd)}"
+LOCK_FILE="$RESOLVED_TARGET/.dispatcher.lock"
+
+if [ ! -f "$LOCK_FILE" ]; then
+  echo "no dispatcher running for this fork (no lock at $LOCK_FILE)"
+  exit 0
+fi
+
+LOCKED_PID=$(grep '^PID=' "$LOCK_FILE" | head -1 | cut -d= -f2)
+if [ -z "$LOCKED_PID" ]; then
+  echo "warning: lock file at $LOCK_FILE has no PID — clearing stale lock" >&2
+  rm -f "$LOCK_FILE"
+  exit 0
+fi
+
+if ! kill -0 "$LOCKED_PID" 2>/dev/null; then
+  echo "warning: lock holder PID $LOCKED_PID is dead — clearing stale lock" >&2
+  rm -f "$LOCK_FILE"
+  exit 0
+fi
+
+kill -TERM "$LOCKED_PID"
+echo "drain signal sent to PID $LOCKED_PID — dispatcher will exit after current dispatch completes"
