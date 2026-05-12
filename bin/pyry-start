@@ -59,6 +59,16 @@ pnpm install --silent
 # artifacts (logs/, .prompt-*.txt, .system-prompt-*.txt) here.
 export AGENTS_REPO_PATH="$AGENTS_DIR"
 
+# Also export TARGET_REPO_PATH BEFORE node starts. The dispatcher's
+# `dispatch.ts` evaluates `const repoRoot = process.env.TARGET_REPO_PATH
+# ? resolve(...) : resolveTargetRepoRoot(agentsRepoRoot)` at module-top —
+# BEFORE dotenv.config() runs further down the same file. Under sibling
+# layout, the fallback resolves to `Projects/` (not a git repo) and the
+# first `git checkout main && git pull` fails with "not a git repository".
+# Pre-exporting from the .env value bypasses the dotenv-load-order bug.
+# See [[Pyrycode/Lessons]] "dotenv loads after repoRoot" entry.
+export TARGET_REPO_PATH="$RESOLVED_TARGET"
+
 # Spawn dispatcher in background so we can capture the actual PID for
 # the lock and clean up on shell exit. `exec` would replace the shell
 # and lose the EXIT trap; we keep the shell alive as a thin lock-holder
