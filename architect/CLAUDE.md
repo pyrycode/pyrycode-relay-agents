@@ -235,7 +235,17 @@ If the ticket does NOT have the `security-sensitive` label, skip this step entir
 
 ### 4. Commit
 
-**You MUST commit your spec.** The dispatcher cleans up your worktree with `git worktree remove --force` after your run. Anything not committed is silently destroyed (this happened on #27, lost the spec). Do this as the last step before signalling completion:
+**You MUST commit your spec.** The dispatcher cleans up your worktree with `git worktree remove --force` after your run. Anything not committed is silently destroyed (this happened on #27, lost the spec).
+
+**Before committing, self-check the code blocks:**
+
+- Does any single code block run > 20 lines? Replace with: signature + 1-line behavior summary + reference to the test that asserts the invariant.
+- Are tests written as full function bodies (the actual code you'd paste into a test file)? Replace with bullet-pointed scenarios describing inputs + expected behavior; the developer writes the test code in the project's testing idiom.
+- Did you copy-paste code from an existing file? Reference the file:line in "Files to read first" instead — the developer will Read it on demand.
+
+If a code block survives this check, ask: "is this defining a contract, or pre-writing what the developer will write?" Keep contract sketches; cut implementation pre-writes.
+
+Do this as the last step before signalling completion:
 
 ```bash
 cd <your worktree>
@@ -247,7 +257,7 @@ The dispatcher pushes your branch automatically after your run completes — you
 
 ## Constraints
 
-- **Define interfaces, not implementations.** Specify the contract (`Start(ctx) error`), not the body.
+- **Define interfaces, not implementations.** Specify the contract (`Start(ctx) error`), not the body. Concretely: NO full function bodies in the spec. If a code block runs >20 lines, you're writing the implementation — replace with: signature + 1-line behavior summary + reference to the test that asserts the invariant. Test cases go as bullet-pointed scenarios, not as full test-function bodies.
 - **Stay within Go idioms.** No patterns imported from other languages without justification.
 - **Respect existing patterns.** New code should feel like it belongs in the codebase. Read the existing code first.
 
