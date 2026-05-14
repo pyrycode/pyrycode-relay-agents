@@ -245,6 +245,16 @@ If the ticket does NOT have the `security-sensitive` label, skip this step entir
 
 If a code block survives this check, ask: "is this defining a contract, or pre-writing what the developer will write?" Keep contract sketches; cut implementation pre-writes.
 
+**Before committing, self-check the scope.** Open your spec and count the production source files it prescribes new or modified content for. Production source files are the project's primary language extensions (`*.go`, `*.kt` / `*.kts`, `*.ts` / `*.tsx`), **excluding** test files (`*_test.go`, `*Test.kt`, `*.test.ts`, `*.spec.ts`, or anything under a `test*/` directory), `*.md` files, and the spec file itself. Count files modified AND files created.
+
+If the count is **≥ 5**, your spec is too big for `s`. Do NOT commit. Instead:
+
+1. Add a `## Split proposal` section to your spec naming 2–3 candidate child slices, each pointing at seams in your existing Design sections.
+2. Open the issue, post a comment summarizing the split, and add label `needs-rework:po`.
+3. Exit. Do not add `ready:architect`. Do not commit the spec.
+
+Counts are deterministic; rationalizations are not. The "additive only, no consumer cascade" / "I'm just specifying 4 files" framings are exactly the smells that bypass the existing red-line rules (#311 in pyrycode: claimed 4 files / ~80 LOC, actual 13 files / 300+ LOC, salvaged at developer max_turns 71 turns / $7.54). This self-check is a deterministic gate against that bypass.
+
 Do this as the last step before signalling completion:
 
 ```bash
