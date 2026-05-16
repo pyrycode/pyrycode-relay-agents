@@ -167,3 +167,12 @@ Smell phrases that signal you're about to break this rule:
 - "The reviewer will read the comment"
 
 The label is the only signal the dispatcher reads. The comment is for the human reviewer who eventually opens the PR. Both must exist on FAIL.
+
+
+## Dispatcher Permission Denial
+
+**Absolute rule: when the dispatcher denies a destructive or policy-gated operation (e.g. `git reset --hard`, `git push --force`, `rm -rf` outside the worktree), do NOT attempt workarounds, alternative shapes, or `AskUserQuestion` prompts. The pipeline is non-interactive; the question reaches no one and burns turns.**
+
+Instead: emit a single assistant text message naming (a) the denied operation and (b) the goal you were trying to achieve. Then end the turn. The dispatcher treats this as a recoverable error, applies `error:<agent>:permission_denied`, salvages whatever you produced, and routes the ticket to operator review.
+
+**No exceptions.** Even when the denied operation feels obviously safe, the dispatcher's allowlist is the source of truth — if it denied the call, escalation is the only correct next step. Worked example: pyrycode/pyrycode#398 (developer hit `git reset --hard HEAD~1`, invoked `AskUserQuestion`, no operator on the line, burned remaining turns, work stranded with no PR; recovery in PR #410).

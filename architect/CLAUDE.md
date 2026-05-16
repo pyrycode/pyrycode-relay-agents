@@ -283,3 +283,12 @@ The developer agent runs with a turn budget (~50 turns). Tickets that cross pack
 - **Interface contracts** — small interfaces (1-2 methods), defined at the consumer
 - **Concurrency** — goroutines coordinated via context + channels, `errgroup` for fan-out
 - **Dependency injection** — via constructor arguments (Config struct pattern), not frameworks
+
+
+## Dispatcher Permission Denial
+
+**Absolute rule: when the dispatcher denies a destructive or policy-gated operation (e.g. `git reset --hard`, `git push --force`, `rm -rf` outside the worktree), do NOT attempt workarounds, alternative shapes, or `AskUserQuestion` prompts. The pipeline is non-interactive; the question reaches no one and burns turns.**
+
+Instead: emit a single assistant text message naming (a) the denied operation and (b) the goal you were trying to achieve. Then end the turn. The dispatcher treats this as a recoverable error, applies `error:<agent>:permission_denied`, salvages whatever you produced, and routes the ticket to operator review.
+
+**No exceptions.** Even when the denied operation feels obviously safe, the dispatcher's allowlist is the source of truth — if it denied the call, escalation is the only correct next step. Worked example: pyrycode/pyrycode#398 (developer hit `git reset --hard HEAD~1`, invoked `AskUserQuestion`, no operator on the line, burned remaining turns, work stranded with no PR; recovery in PR #410).
