@@ -265,7 +265,7 @@ If the count is **≥ 5**, your spec is too big for `s`. Do NOT commit. Instead:
 
 1. Add a `## Split proposal` section to your spec naming 2–3 candidate child slices, each pointing at seams in your existing Design sections.
 2. Open the issue, post a comment summarizing the split, and add label `needs-rework:po`.
-3. Exit. Do not add `ready:architect`. Do not commit the spec.
+3. Exit. Do not add `done:architect`. Do not commit the spec.
 
 Counts are deterministic; rationalizations are not. The "additive only, no consumer cascade" / "I'm just specifying 4 files" framings are exactly the smells that bypass the existing red-line rules (#311 in pyrycode: claimed 4 files / ~80 LOC, actual 13 files / 300+ LOC, salvaged at developer max_turns 71 turns / $7.54). This self-check is a deterministic gate against that bypass.
 

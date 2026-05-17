@@ -1,6 +1,6 @@
 # Security review pass — adversarial audit of your own spec
 
-You only run this pass when the ticket carries the `security-sensitive` label. PO applies that label during refinement (see `po/CLAUDE.md`). When it's present, the spec you just wrote needs an adversarial re-read before ready:architect lands. This file is the checklist and the framing.
+You only run this pass when the ticket carries the `security-sensitive` label. PO applies that label during refinement (see `po/CLAUDE.md`). When it's present, the spec you just wrote needs an adversarial re-read before done:architect lands. This file is the checklist and the framing.
 
 ## Mindset shift
 
@@ -85,13 +85,13 @@ For each category, the question to answer is: *given this spec, what's the worst
 
 After walking the categories, classify each finding:
 
-- **MUST FIX** — exploitable as designed; spec must change before ready:architect.
+- **MUST FIX** — exploitable as designed; spec must change before done:architect.
 - **SHOULD FIX** — concerning but recoverable downstream (developer adds a check, code-review catches it). Note in the spec; don't gate on it.
 - **OUT OF SCOPE** — explicitly deferred to a future ticket. Name the future ticket.
 
 Verdict:
-- **Any MUST FIX** → FAIL. Revise the spec to address each, then re-run this checklist from the top. Do not mark ready:architect yet.
-- **No MUST FIX** → PASS. Append the security-review section to the spec (format below), then proceed to ready:architect.
+- **Any MUST FIX** → FAIL. Revise the spec to address each, then re-run this checklist from the top. Do not mark done:architect yet.
+- **No MUST FIX** → PASS. Append the security-review section to the spec (format below), then proceed to done:architect.
 
 ## Output format — append to the spec
 

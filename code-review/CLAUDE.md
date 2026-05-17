@@ -123,8 +123,8 @@ If the ticket does NOT have the `security-sensitive` label, skip this section en
 3. Check that `go vet`, `staticcheck`, and `go test -race` pass (CI should confirm)
 4. Write findings as PR comments with line references
 5. Make the PASS/FAIL decision
-6. **If FAIL: run `gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode-relay` BEFORE returning.** The *label* is what the dispatcher reads to route the ticket back to the developer. The "Decision: FAIL" line in your PR comment is for humans only — without the label, the dispatcher treats the run as a pass, applies `ready:code-review`, and auto-advances broken work to the Documentation column. This is non-negotiable; see "Mechanical contract" below.
-7. **If PASS: do nothing label-wise.** The dispatcher applies `ready:code-review` automatically when no `needs-rework:*` label is present.
+6. **If FAIL: run `gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode-relay` BEFORE returning.** The *label* is what the dispatcher reads to route the ticket back to the developer. The "Decision: FAIL" line in your PR comment is for humans only — without the label, the dispatcher treats the run as a pass, applies `done:code-review`, and auto-advances broken work to the Documentation column. This is non-negotiable; see "Mechanical contract" below.
+7. **If PASS: do nothing label-wise.** The dispatcher applies `done:code-review` automatically when no `needs-rework:*` label is present.
 
 ## Output
 
@@ -154,12 +154,12 @@ If FAIL: explain what needs to change before re-review.
 
 The dispatcher does NOT parse your PR comment. It reads GitHub labels. The full contract:
 
-- **PASS path:** no label changes from you. Dispatcher checks for `needs-rework:*`, finds none, applies `ready:code-review`, auto-advances to In Documentation.
-- **FAIL path:** YOU add `needs-rework:developer` (per Workflow step 6). Dispatcher sees it, skips `ready:code-review`, routes the ticket back to the developer column.
+- **PASS path:** no label changes from you. Dispatcher checks for `needs-rework:*`, finds none, applies `done:code-review`, auto-advances to In Documentation.
+- **FAIL path:** YOU add `needs-rework:developer` (per Workflow step 6). Dispatcher sees it, skips `done:code-review`, routes the ticket back to the developer column.
 
 If you write "Decision: FAIL" in the comment but don't add the label, **the ticket auto-advances anyway** — the comment is invisible to the dispatcher. This isn't a soft expectation; it's the contract.
 
-This rule exists because of an actual incident, not a hypothetical. **2026-05-07 (#155):** code-review ran on a stale worktree (separate dispatcher bug, since fixed), wrote "Decision: FAIL" in a PR comment, but didn't add `needs-rework:developer`. The dispatcher labeled `ready:code-review`, auto-advanced #155 to In Documentation, and documentation ran against the failed code. Surfaced as the canonical worked example for why this rule is mechanical, not stochastic.
+This rule exists because of an actual incident, not a hypothetical. **2026-05-07 (#155):** code-review ran on a stale worktree (separate dispatcher bug, since fixed), wrote "Decision: FAIL" in a PR comment, but didn't add `needs-rework:developer`. The dispatcher labeled `done:code-review`, auto-advanced #155 to In Documentation, and documentation ran against the failed code. Surfaced as the canonical worked example for why this rule is mechanical, not stochastic.
 
 Smell phrases that signal you're about to break this rule:
 - "I'll explain the FAIL in the comment, the verdict is clear from the text"

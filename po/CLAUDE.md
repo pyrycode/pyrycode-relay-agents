@@ -29,7 +29,7 @@ A ticket lands in your column with a rough body — usually a one-line idea, som
 3. Split if oversized — one ticket per concern.
 4. If the ticket is too thin to refine, demote it back to Inbox with a comment requesting human input.
 
-When you're done, the dispatcher auto-adds `ready:po` and advances the ticket to In Architecture. You do not add `ready:po` manually.
+When you're done, the dispatcher auto-adds `done:po` and advances the ticket to In Architecture. You do not add `done:po` manually.
 
 ## Apply `security-sensitive` label
 
@@ -214,7 +214,7 @@ The new issues will get picked up by your column on subsequent dispatch cycles. 
 
 ## Demoting Back to Inbox
 
-If a Backlog ticket lacks enough information to refine (the body is just "fix bug" with no context, or references something you can't find), don't add `ready:po` and don't refine. Instead:
+If a Backlog ticket lacks enough information to refine (the body is just "fix bug" with no context, or references something you can't find), don't add `done:po` and don't refine. Instead:
 
 1. Add a comment on the issue explaining what's missing — be specific. Example: *"This ticket needs concrete examples of the failing case. Which command? What error? What did you expect?"*
 2. Move the ticket back to **Inbox** status via `gh project item-edit ... --field-id <Status field id> --single-select-option-id <Inbox option id>`.
@@ -228,7 +228,7 @@ The dispatcher will not retry; the human sees the ticket reappear in Inbox with 
 - **Don't prescribe class/function names** — describe the behavior, not the code structure.
 - **One concern per ticket.** "Add backoff cooldown and control socket" is two tickets.
 - **Preserve human framing.** If the inbox body has a useful turn of phrase, keep it. Don't smooth over distinctive voice in the name of "structure."
-- **Don't add `ready:po` manually.** The dispatcher adds it automatically when you complete successfully without adding `needs-rework:*` or moving the ticket to Inbox.
+- **Don't add `done:po` manually.** The dispatcher adds it automatically when you complete successfully without adding `needs-rework:*` or moving the ticket to Inbox.
 
 ## Rework Mode
 
@@ -236,7 +236,7 @@ If a ticket was routed back to you (`needs-rework:po` from a downstream agent):
 
 1. Read the issue comments to understand why.
 2. Common reasons: ticket too large (split it), unclear acceptance criteria (rewrite), missing context (add it).
-3. After fixing, the dispatcher auto-adds `ready:po` again (you don't need to add it manually).
+3. After fixing, the dispatcher auto-adds `done:po` again (you don't need to add it manually).
 
 ## Output
 
@@ -244,10 +244,10 @@ If a ticket was routed back to you (`needs-rework:po` from a downstream agent):
 - For splits: see "Splitting" above.
 - For demotion: see "Demoting Back to Inbox" above.
 
-Do NOT create the parent issue — it already exists, you're refining what the human triaged. (Child issues from a split ARE created via `gh issue create`; see the Splitting section.) Do NOT add `ready:po` manually — the dispatcher handles that.
+Do NOT create the parent issue — it already exists, you're refining what the human triaged. (Child issues from a split ARE created via `gh issue create`; see the Splitting section.) Do NOT add `done:po` manually — the dispatcher handles that.
 
 ## Reference
 
 - Pipeline architecture: `📋 Projects/2026-04-10 - Pyrycode/Pipeline.md` (in the vault) or `docs/agentic-workflow.md` (if present in the repo)
 - Sizing examples and past tickets: search QMD `pyrycode-docs` collection
-- The dispatcher's auto-label behavior: `agents/dispatcher/src/dispatch.ts` (submodule) around the `addLabel(item.issueNumber, "ready:" + agent.name)` call
+- The dispatcher's auto-label behavior: `agents/dispatcher/src/dispatch.ts` (submodule) around the `addLabel(item.issueNumber, "done:" + agent.name)` call
