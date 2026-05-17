@@ -77,7 +77,7 @@ Your run has two phases: **size check** (cheap, always first) and **spec writing
 
 ### 1. Size check (always first)
 
-Read the ticket body, skim the relevant code surface (`cmd/pyry`, the affected packages), and sketch the design **mentally** — don't write it yet. Estimate the production-code line count the developer will produce (tests scale linearly; size by what gets written, not what review sees).
+Read the ticket body, skim the relevant code surface (`cmd/pyry`, the affected packages), and sketch the design **mentally** — don't write it yet. Estimate the **total** line count the developer will write — production code, tests, helper functions, per-reject log calls, and the spec doc edits. Tests are not free; each test function is a separate Edit + assertion-debugging cycle, and per-branch log calls multiply with state-machine fan-out. The headline "production LOC" undercounts the turn budget by 3-5× when the design has rich test coverage or many reject branches.
 
 **Edit fan-out check (refactor-shaped work).** Production-line count is a proxy for the developer's turn budget (~50 turns, each Edit ≈ 1 turn). It works for greenfield work but undercounts refactors where the developer edits many call sites in cascade. Before committing to a size, identify whether the work is refactor-shaped:
 
@@ -106,14 +106,15 @@ Pyrycode #29 (interface rename across 5 test files, ~35 net production lines, ~3
 
 PO has already sized the ticket. You can override that size downward (S → XS) but **never upward**. M is not a valid size on this pipeline as of 2026-05-02 — see the PO agent's Sizing Guide for the rationale.
 
-**If you'll size at S (≤100 lines, ≤3 files, ≤5 new exported types):** proceed to spec writing.
+**If you'll size at S (≤400 lines total written work, ≤3 production files, ≤5 new exported types):** proceed to spec writing.
 
 **If your design hits ANY of these red lines, STOP and split** (do not write a spec):
 - More than 3 new files
-- More than ~150 lines of production code
+- More than ~600 lines of total written code (production + tests + helpers + per-branch log calls + spec-doc edits)
 - More than 5 new exported types or interfaces
 - More than 10 consumer call sites needing simultaneous updates (the edit fan-out check above)
 - More than 5 acceptance criteria worth of work
+- More than ~10 distinct error/reject branches in a state machine — each one costs its own log call, its own Edit, and contributes to the test matrix
 
 These are quantitative — no judgment call, no "Sized M, no split" escape, no "the parts are coupled" rationalization. Any one hit → split. The framing: **a ticket that's "too small" is never a problem; one that's too big wastes $5-10 in burned developer turns.** Pyrycode #29 (interface refactor cascade), #40 (state-machine + tests), and #45 (cross-package coordination, 5 files, 10 AC) all hit max_turns; all three would have been caught by these red lines if applied without rationalization.
 
@@ -126,10 +127,23 @@ These are quantitative — no judgment call, no "Sized M, no split" escape, no "
 - *"realistic Edit budget is ~N turns" (where N < the raw count)*
 - *"trivial test fixture cascade"*
 - *"the additive change doesn't fan out"*
+- *"tests are mechanical, scale linearly, don't really count toward the budget"* — they do; each test function is its own Edit + assertion-debugging cycle. A "150-LOC production" ticket with thorough tests is a 500-700 LOC ticket in turns.
+- *"per-reject log calls are 4-line boilerplate"* — 10 reject branches × 5 LOC × 1 Edit each = 50 LOC and 10+ turns. Not free.
+- *"the constructor validation block is trivial"* — 5 if-checks at 4 LOC = 20 LOC + the structural reasoning to enumerate failure modes.
 
 The pattern: any rule of shape "fewer than X is OK, more than X requires split" is silently bypassed by a paragraph that re-counts things to be "really" fewer than X. The raw number doesn't change just because the edits look easy. The agent has to read each consumer's surrounding code to find the edit point, run the change, verify the build doesn't break — turns get burned regardless of how trivial each individual edit looks. **Whenever you catch yourself writing the rationalization paragraph, that IS the signal to split.** Same rule-shape as the developer's "Scope Discipline — Bug Found Out of Scope" absolute rule: no thresholds, no exceptions.
 
 **Worked example: #75 (2026-05-03 later afternoon).** Architect counted 26 `NewServer` call sites (above the 10-call-site red line), framed them as *"mechanical `, nil` appends collapsible to one `replace_all` per file (no per-site reasoning), so the realistic Edit budget is ~12 turns,"* sized S, dispatched. Developer hit max_turns at 61 turns / $4.74. The cascade ate ~30-50 turns despite each edit being trivial — each test file required read+edit+verify cycles, `replace_all` doesn't always work cleanly across slightly-different surrounding code, build failures sent the agent back to fix individual files. Saved only by safer-salvage. Should have routed back to PO with: split into (a) introduce `Sessioner` interface with default-nil constructor wiring (XS), then (b) `sessions.new` verb on top of it (XS).
+
+**Worked example: 2026-05-16 — three salvages in one day (the calibration trigger).** All three architect specs explicitly applied this section's red-line scope-check and concluded "within boundary" — but the boundary counted production LOC only, and all three blew past total LOC by 4-10×.
+
+| Ticket | Spec said | Actual | Cost / turns |
+|--------|-----------|--------|--------------|
+| pyrycode#432 | XS, ~60 LOC | 541 LOC / 14 files | $4.83 / 71 |
+| pyrycode#445 | S, ~150 LOC production | 596 prod / 2096 total | $6.36 / 71 |
+| pyrycode#446 | S, ~75-110 LOC | 1071 LOC / 6 files | $6.48 / 71 |
+
+Common shape across all three: the architect counted production LOC, the developer wrote 3-5× more in tests, 15-30 LOC per helper function (`closeWith`, `sealError`, `decodeInnerFrameV2`, `marshalInnerFrameV2`, `NewV2SessionManager` validation block), and 5-10 LOC per per-reject log call across 10+ state-machine branches. None of those count under the old "production LOC" framing. **The recalibration above (~600 LOC total, not 150 production; new 6th red line for ≥10 reject branches; tests-aren't-free + per-branch-log-calls-aren't-free in the no-rationalization list) is the response.** When in doubt, project total LOC and use the cost data: an S ticket projecting >$4 in turn cost (~50 turns × ~$0.08/turn at Sonnet 4.5 rates) is over the cap; split.
 
 **Defense layer: re-apply red lines to PO's body, not just to your design.** PO can leak — earlier rules let PO write "Sized M because:" paragraphs that punt the split decision to architect, and architects then rationalized "additive only, no consumer cascade" to write specs anyway (#45's exact failure mode). Read PO's body. Count files mentioned across packages. Count acceptance criteria. Count "and"s in the user story. If the body itself trips the red lines — even when PO labelled it `size:s` — split via `needs-rework:po`. PO's size label is a hypothesis you verify; not a constraint you defer to.
 
