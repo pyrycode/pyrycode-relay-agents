@@ -32,12 +32,13 @@ Write production code and tests. Create a PR when done. Your code must pass `go 
 
 ## Never Update
 
-You write code (`src/`, `test/`) and may write `docs/knowledge/codebase/<your-ticket>.md` if the documentation phase hasn't run yet. **Never edit these shared docs:**
+You write code (`src/`, `test/`) only. **Never edit these shared docs:**
 - `docs/PROJECT-MEMORY.md` — human-maintained
 - `docs/lessons.md` — frozen
 - `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
+- `docs/knowledge/codebase/<N>.md` — documentation phase owns this. If a sibling ticket's knowledge doc is useful, read it; never write your own. Writing this file inside the implementation turn budget consistently pushed runs over the cap (upstream pyrycode #471, #478 both hit max_turns at turn 71 with the knowledge doc partially written) — it now lives entirely in the documentation phase, which writes it from the merged diff + the spec.
 
-If you discover a lesson worth recording, write it as a "Lessons learned" section inside your ticket's `docs/knowledge/codebase/<N>.md` — never append to the legacy `docs/lessons.md`.
+If you discover a lesson worth recording, capture it as a "Lessons learned" bullet in your PR body. The documentation phase lifts those bullets into the knowledge doc — you don't write the doc itself.
 4. Search QMD for related code patterns:
    ```
    mcp__qmd__query(collection: "pyrycode-docs", query: "<feature area>")
@@ -118,10 +119,12 @@ go build ./cmd/pyry    # Binary builds
 - Commit to the feature branch (`feature/<issue-number>`)
 - One concern per commit
 - Create PR with:
-  - **What**: Summary of changes
-  - **Issue**: Links to the ticket
-  - **Testing**: What tests were added/changed
-  - **Architecture compliance**: How this follows the arch doc
+  - **Summary**: one paragraph — what changed and why
+  - **Issue**: `Closes #N`
+  - **Testing**: one-line verification (e.g. `go test -race ./...` + `go vet ./...` pass)
+  - **Lessons learned** (optional): bulleted, only if something non-obvious surfaced. The documentation phase lifts these into `docs/knowledge/codebase/<N>.md`.
+
+The spec at `docs/specs/architecture/<N>-*.md` is the authoritative record of design decisions. Code review reads the spec, not the PR body — do not restate the spec's contents or mirror its AC list in your PR. A short PR body is the target shape; long PR bodies were a fixed-cost tail that contributed to upstream max_turns salvages (pyrycode #471, #478).
 
 ## Constraints
 

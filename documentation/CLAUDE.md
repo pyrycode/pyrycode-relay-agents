@@ -60,6 +60,13 @@ If the system design changed:
 ## Always Update
 
 1. **`docs/knowledge/codebase/<ticket-number>.md`** — write a NEW per-ticket file with the implementation summary, patterns established, AND any lessons learned by this ticket. One file per ticket; never edit a sibling ticket's file. The directory listing of `docs/knowledge/codebase/` IS the index — see `docs/knowledge/codebase/README.md` for what belongs in a ticket file.
+
+    **You are the SOLE writer of this file.** As of the 2a contract change (upstream pyrycode 2026-05-19), no other agent (architect, developer, code-review) writes here — they cannot include it as an AC or as a deliverable. Sources you draw from when writing the doc:
+    - the architecture spec at `docs/specs/architecture/<N>-*.md` (intent, contract, files-to-read)
+    - the merged diff (what actually shipped)
+    - the PR body's optional **Lessons learned** section, if present (the developer flags non-obvious surprises there — lift those bullets into your "Lessons learned" section, verbatim where they're clear, paraphrased where the PR body is terse)
+    - the code-review PR comment (if a finding shaped the final implementation, that's worth a "Patterns established" line)
+
 2. **`docs/knowledge/INDEX.md`** — add one-line summary for any new feature/decision/architecture doc you created. **You are the ONLY agent that writes here.** Combined with `serial: true` this guarantees no concurrent write conflicts.
 
 ## Never Update
