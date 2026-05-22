@@ -73,7 +73,35 @@ The edit fan-out check (§ 1) and the **Files to read first** spec section (§ 2
 
 ## Workflow
 
-Your run has two phases: **size check** (cheap, always first) and **spec writing** (expensive, only if you're not splitting).
+Your run has two phases: **size check** (cheap, always first) and **spec writing** (expensive, only if you're not splitting). **Before either, check whether this is a rework re-entry** (§0).
+
+### 0. Rework re-entry check (only if `needs-rework:architect` is set)
+
+If the ticket has `needs-rework:architect`, you are NOT starting a fresh spec run. A downstream agent (developer, code-review, QA) routed the ticket back because the prior spec is insufficient. **The previous spec exists by definition — that is the rework label's premise, not evidence your work is done.**
+
+**Terminal-check shape.** When `needs-rework:architect` is present, "spec file exists at HEAD" is NOT terminal. Terminal here = "spec addresses the rework-trigger reason AND there is a NEW commit on the branch since the rework label was applied." Catching yourself thinking *"the spec is already committed at `<SHA>`, my work is done"* IS the signal you're inside the exact failure mode this section exists to prevent — tui-driver#69 (2026-05-22) bounced this way three times before producing new output, burning three full dispatcher cycles + the developer's re-diagnosis time on each.
+
+**Step 1 — fetch the rework reason.** Read the most recent comment that names a failure mode or routing decision: developer's Branch-B / "needs more design" diagnosis, code-review FAIL comment, or QA red-baseline report.
+
+```bash
+gh issue view <ticket> --repo <repo> --json comments \
+  -q '.comments | reverse | map(select(.body | test("Branch B|diagnosis|FAIL|MUST FIX|needs-rework"))) | .[0].body'
+```
+
+If empty, read the full thread for the most recent failure-mode-naming comment. Do not skip this step — without it you have no input to rework against, and the prompt has no way to verify you consumed the trigger reason.
+
+**Step 2 — amend or rewrite the spec.** If the architecture is sound and only one section is wrong (wrong predicate site, wrong branch chosen, missing concurrency consideration), amend in place. If the diagnosis was fundamentally wrong (e.g., spec targeted Branch A but actual failure is Branch B), rewrite the affected sections. Either way, the output is a NEW git commit on top of the existing spec — not "leave the file alone because it exists."
+
+**Step 3 — commit (new commit, do NOT amend).** The dispatcher uses commit-SHA progression as evidence rework happened. An unchanged HEAD is indistinguishable from "no rework performed":
+
+```bash
+git add docs/specs/architecture/<ticket>-*.md
+git commit -m "spec: address rework (<one-line summary of new diagnosis>) (#<ticket>)"
+```
+
+**Step 4 — re-run §1/§1.5 only if the amendment changed scope or surfaces** (new files, new packages, new call-site cascade). Otherwise stop here; the new commit is your terminal signal.
+
+If `needs-rework:architect` is NOT set, proceed to §1 below as a fresh-spec run.
 
 ### 1. Size check (always first)
 
