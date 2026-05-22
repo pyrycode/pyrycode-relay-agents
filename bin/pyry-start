@@ -100,28 +100,38 @@ while [ $i -lt 30 ]; do
 done
 [ -z "$DISPATCHER_PID" ] && DISPATCHER_PID="$PNPM_PID"  # fallback
 
-# Write the lock + register cleanup. EXIT and TERM fire the cleanup;
+# Register traps BEFORE writing the lock file. If the user presses
+# Ctrl+C between `cat > $LOCK_FILE` and the trap install, the wrapper
+# would exit with default SIGINT handling and leave a stale lock
+# (background pnpm/node still alive, but no cleanup). Installing the
+# traps first closes that race window.
+#
 # SIGINT is deliberately *ignored* in this wrapper (the dispatcher
 # catches its own SIGINT and enters drain mode — we don't need the
 # wrapper to react). Without `trap '' INT` the wrapper's INT handler
 # would interrupt `wait` on the first Ctrl+C and the script would
 # exit; the user's interactive shell would then grab the terminal
 # back while pnpm/node are still draining, and the in-flight ticket's
-# stdout would bleed into the post-prompt shell. SIGKILL still leaves
-# a stale lock; the next pyry-start detects it and clears.
+# stdout would bleed into the post-prompt shell.
+#
+# EXIT and TERM fire the lock cleanup. SIGKILL still leaves a stale
+# lock; the next pyry-start detects it and clears.
+trap '' INT
+trap "rm -f '$LOCK_FILE'" EXIT TERM
+
 cat > "$LOCK_FILE" <<EOF
 PID=$DISPATCHER_PID
 AGENTS_REPO_PATH=$AGENTS_DIR
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-trap '' INT
-trap "rm -f '$LOCK_FILE'" EXIT TERM
 
-# Block until the dispatcher exits. `wait` can be interrupted by any
-# signal whose handler is set (EINTR-equivalent in shell semantics),
-# so re-wait in a loop while the dispatcher PID is still alive — the
-# wrapper must outlive the dispatcher so the user's interactive shell
-# doesn't reclaim the terminal mid-drain.
-while kill -0 "$PNPM_PID" 2>/dev/null; do
-  wait "$PNPM_PID" 2>/dev/null || true
-done
+# Block until the dispatcher exits. With SIGINT ignored above, `wait`
+# is not interrupted on Ctrl+C, so a single call is enough — no
+# re-wait loop needed. The earlier draft of this fix used a `while
+# kill -0 ...; do wait ...; done` loop as defence-in-depth, but that
+# pattern has a theoretical PID-reuse hazard (reaped PID gets reused
+# by another same-user process within microseconds → kill -0 returns
+# 0, wait returns 127, `|| true` swallows it, tight infinite loop).
+# `2>/dev/null || true` swallows the rare 127-from-not-our-child case
+# that could arise if a stray HUP/USR1 ever lands and a handler runs.
+wait "$PNPM_PID" 2>/dev/null || true
