@@ -174,14 +174,54 @@ A test ticket that ships a "small" production fix:
 
 **Worked example: #155** (pyry attach --create-if-missing, sized S). Developer wrote `TestPool_GetOrCreate_PersistsPostDetach` which failed because `Session.Evict` returns when `evictedCh` closes, but `pool.persist()` runs *after* the lock is released — a pre-existing race in `session.go` (NOT in the ticket's diff). Agent thrashed ~15 turns trying to fix the race instead of bailing; max_turns hit at 71 / $7.27; the salvage PR shipped with one failing test. Right move from line one of the failure: skip the test, file the race as a separate bug, exit — which is what the salvage triage ended up doing manually. The "I wrote the test, the failure is mine to debug" mental model is the trap; the trigger is "does fixing this require editing production code outside my diff?"
 
-## Rework Mode
+## Rework Mode (if `needs-rework:developer` is set)
 
-If routed back from code review:
-1. Read the review findings on the PR
-2. Fix all MUST FIX items
-3. Address SHOULD FIX items (3+ unfixed = another fail)
-4. Push fixes to the same branch
-5. The updated PR will be re-reviewed
+If the ticket has `needs-rework:developer`, you are NOT starting a fresh implementation run. Code-review (or, on architect-rework chains, the architect's spec change) routed the ticket back because the prior delivery is insufficient. **The PR exists by definition — that is the rework label's premise, not evidence your work is done.**
+
+**Terminal-check shape.** When `needs-rework:developer` is present, "tests pass + AC list looks satisfied on current branch state" is NOT terminal. Terminal here = "every MUST FIX from the rework trigger has a corresponding commit on the branch that addresses it." Catching yourself thinking *"`go test -race` is clean, AC are satisfied, ready to mark done"* without first reading the FAIL comment IS the signal you're inside the failure mode this section exists to prevent — pyrycode#383 (2026-05-16) shipped a rework PR that ran tests clean and claimed "all AC are satisfied" without reverting the offending commit code-review specifically flagged.
+
+**Step 1 — fetch the rework reason.** Read the most recent comment that names findings: code-review's FAIL comment with MUST FIX / SHOULD FIX list, the architect's re-spec commit message, or any explicit `needs-rework:developer` rationale.
+
+```bash
+gh pr view <pr> --repo <repo> --json comments,reviews \
+  -q '[.reviews[], .comments[]] | sort_by(.createdAt) | reverse |
+      map(select(.body | test("MUST FIX|SHOULD FIX|FAIL|needs-rework"))) | .[0].body'
+```
+
+If empty, read the full thread for the most recent findings-naming comment. Do not skip this step — without it you have no input to rework against.
+
+**Step 2 — enumerate every MUST FIX and SHOULD FIX explicitly.** Write the list (in your head or as scratch) before touching any code:
+
+- MUST FIX 1: <one-line summary, file:line if given>
+- MUST FIX 2: ...
+- SHOULD FIX 1: ...
+
+Every MUST FIX must be addressed before completion. Three or more SHOULD FIX items left unaddressed = another FAIL — fix them or justify deferral in your completion comment.
+
+**Step 3 — address each item with a NEW commit (do NOT amend, do NOT force-push).** The dispatcher uses commit-SHA progression as evidence rework happened. One commit per concern is preferred; one commit covering multiple related fixes is acceptable if they're tightly scoped:
+
+```bash
+git commit -m "fix: <one-line summary of MUST FIX 1> (#<ticket>)"
+```
+
+If a MUST FIX requires reverting a prior commit on the branch (e.g., code-review flagged an out-of-scope edit), revert it explicitly with `git revert <sha>` — don't try to "rewrite" via amend or fresh edit.
+
+**Step 4 — run verification before completion**:
+
+```bash
+go test -race ./...    # all green
+go vet ./...           # clean
+go build ./cmd/pyry    # builds
+```
+
+**Step 5 — push and let the dispatcher mark `ready:developer`.** Your completion comment should explicitly acknowledge each MUST FIX with the commit SHA that addressed it:
+
+> **Rework addressed:**
+> - MUST FIX 1 → `<sha>` (one-line how)
+> - MUST FIX 2 → `<sha>` (one-line how)
+> - SHOULD FIX 1 → `<sha>` or "deferred because <reason>"
+
+**If `needs-rework:developer` is NOT set**, this section does not apply — proceed through Development Process §1-§5 as a fresh implementation run.
 
 ## Build Commands
 
