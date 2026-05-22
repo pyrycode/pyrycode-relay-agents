@@ -138,7 +138,7 @@ fi
 
 1. **`REGRESSIONS` non-empty** → at least one failing test passed on the baseline but fails on this PR. The PR caused at least one new failure. Route as standard red: add `needs-rework:developer`, post the standard red template. Mention the specific regression names. If `PRE_EXISTING` is also non-empty, mention those too but flag them as "pre-existing, separate bug ticket to follow after rework lands."
 
-2. **`REGRESSIONS` empty AND `PRE_EXISTING` non-empty** → ALL failing tests fail on baseline too. The PR did not introduce them. Route as out-of-scope: file a bug ticket on board #1 for the `PRE_EXISTING` set, add `done:qa` (NOT `needs-rework:developer`), post `--comment` review using the out-of-scope-red template below.
+2. **`REGRESSIONS` empty AND `PRE_EXISTING` non-empty** → ALL failing tests fail on baseline too. The PR did not introduce them. Route as out-of-scope: file a bug ticket on board #1 (status: **Backlog**, position: **top**) for the `PRE_EXISTING` set, add `done:qa` (NOT `needs-rework:developer`), post `--comment` review using the out-of-scope-red template below.
 
 3. **Baseline couldn't run** (merge-base unresolved, worktree add failed, baseline log missing) → fall back to standard red routing (`needs-rework:developer`). The deterministic gate failed; default to safe behaviour.
 
@@ -190,7 +190,7 @@ Then add the label:
 gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode
 ```
 
-If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is non-empty, file a separate bug ticket on board #1 (label `bug`, `size:s`) before posting the review so the linkage is in the review body.
+If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is non-empty, file a separate bug ticket on board #1 (label `bug`, `size:s`, status `Backlog`, position top) before posting the review so the linkage is in the review body.
 
 ### Out-of-scope-red template (case: all failures are pre-existing)
 
@@ -212,10 +212,17 @@ Filed as separate bug ticket: #<NEW>
 Routing to code-review for judgment review.
 ```
 
-Out-of-scope routing actions — three commands, all required. **Per [[Pipeline]] gotcha, `gh project item-add` does NOT auto-set Status — the item lands invisible to the board's column queries. You must explicitly set Status after adding.** Resolve the Status field + Inbox option IDs at runtime (they can churn across `updateProjectV2Field` mutations, per the 2026-05-22 lesson).
+Out-of-scope routing actions — four commands, all required.
+
+**Bug ticket destination = Backlog, top position.** Backlog (not Inbox) because the ticket already carries agent-validated evidence (failing test names + baseline-comparison logs proving these aren't this PR's regressions) — PO can refine without human pre-triage. Top of Backlog (not bottom) because an unmasked pre-existing failure means main has a real bug that just surfaced; it deserves priority over already-refined work below.
+
+**Gotcha alignments:**
+- Per [[Pipeline]] gotcha, `gh project item-add` does NOT auto-set Status — the item lands invisible to the board's column queries. Explicit `gh project item-edit` is required after.
+- Status field + Backlog option IDs are resolved at runtime, not hardcoded — `updateProjectV2Field` mutations reissue option IDs (per the 2026-05-22 board-mutation lesson).
+- `updateProjectV2ItemPosition` with `afterId` omitted positions the item at the top of the project (which, when filtered to the Backlog column, equals top of Backlog).
 
 ```bash
-# A. File the bug ticket on board #1
+# A. File the bug ticket on board #1.
 url=$(gh issue create --repo pyrycode/pyrycode \
   --title "<PRE_EXISTING-names>: pre-existing failures unmasked by PR #<PR>" \
   --label "bug" --label "size:s" \
@@ -224,16 +231,29 @@ url=$(gh issue create --repo pyrycode/pyrycode \
 # evidence (both make check tails, with token redaction), and "cause not yet
 # diagnosed" unless you've identified it.
 
-# A.1 Add to board #1, capture item ID, set Status = Inbox.
+# A.1 Add to board #1, resolve project + Status-field + Backlog-option IDs at runtime.
 item_id=$(gh project item-add 1 --owner pyrycode --url "$url" --format json --jq '.id')
+project_id=$(gh project view 1 --owner pyrycode --format json --jq '.id')
 field_json=$(gh project field-list 1 --owner pyrycode --format json)
 status_field_id=$(echo "$field_json" | jq -r '.fields[] | select(.name == "Status") | .id')
-inbox_option_id=$(echo "$field_json" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "Inbox") | .id')
+backlog_option_id=$(echo "$field_json" | jq -r '.fields[] | select(.name == "Status") | .options[] | select(.name == "Backlog") | .id')
+
+# A.2 Set Status = Backlog.
 gh project item-edit \
-  --project-id "$(gh project view 1 --owner pyrycode --format json --jq '.id')" \
+  --project-id "$project_id" \
   --id "$item_id" \
   --field-id "$status_field_id" \
-  --single-select-option-id "$inbox_option_id"
+  --single-select-option-id "$backlog_option_id"
+
+# A.3 Move to top of project (= top of Backlog when the column filters).
+#     Omitting afterId in updateProjectV2ItemPosition sends the item to position 1.
+gh api graphql -f query='
+mutation($projectId: ID!, $itemId: ID!) {
+  updateProjectV2ItemPosition(input: { projectId: $projectId, itemId: $itemId }) {
+    clientMutationId
+  }
+}
+' -f projectId="$project_id" -f itemId="$item_id" > /dev/null
 
 # B. Apply done:qa to the original ticket (NO needs-rework label).
 # Skip — the dispatcher applies done:qa automatically when no needs-rework label is present.
