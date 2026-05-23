@@ -176,7 +176,13 @@ Regressions (passed on baseline `<sha>`, fail on PR):
 
 Pre-existing failures (fail on both baseline AND PR branch, NOT caused by this PR):
 - TestName3
-  (filed as separate bug ticket: #<NEW> — to be addressed independently)
+  (tracking: see the partitioned KNOWN/NEW shape below — either re-observed in an existing tracking ticket, or filed as a new ticket)
+
+<TRACKING-BLOCK — same shape as out-of-scope-red below:
+  all-KNOWN  → `Tracking (re-observed): #X (for TestName3)`
+  all-NEW    → `Filed as separate bug ticket: #Z`
+  mixed      → both lines
+>
 
 Last 5 lines of `make check`:
 ```
@@ -190,9 +196,75 @@ Then add the label:
 gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode
 ```
 
-If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is non-empty, file a separate bug ticket on board #1 (label `bug`, `size:s`, status `Backlog`, position top) before posting the review so the linkage is in the review body.
+If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is non-empty, follow the **"Filing pre-existing-failure tickets — search-first dedupe"** procedure below BEFORE posting the review so the linkage (which tickets new, which re-observed) is in the review body.
+
+### Filing pre-existing-failure tickets — search-first dedupe
+
+**Rule.** Before filing ANY new bug ticket for a pre-existing failure, search open issues for an existing tracking ticket. If one exists, comment-and-link instead of creating a new one.
+
+**Why this exists.** Without dedupe, every PR cycle that re-encounters the same unmasked pre-existing failure files a fresh duplicate. Real-world precedent (2026-05-23): `snapshot-drift` on `pyrycode/tui-driver` was re-filed as #75 → #83 → #92 across three PR cycles in 48 hours before this rule landed, each closed as superseded.
+
+**Procedure.** For each check name in `PRE_EXISTING` (the set of failures appearing on both baseline AND PR branch):
+
+```bash
+# Search open issues whose title contains the check name.
+# Use a literal-string match: the check name in quotes, restricted to title.
+candidates=$(gh issue list --repo pyrycode/pyrycode --state open \
+               --search "\"<check-name>\" in:title" \
+               --json number,title,url \
+               --limit 20)
+```
+
+Inspect `candidates`. A candidate qualifies as a tracking ticket for THIS check if its title contains BOTH:
+
+1. The check name as a substring (case-insensitive), AND
+2. A marker word indicating it's a tracking-issue shape — one of: `pre-existing`, `unmasked`, `drift`, `flaky`, or `tracking`.
+
+Use judgment on close calls: if a candidate's title looks like a tracking ticket the title-matching alone might miss (e.g., title is the bare check name with no marker but body clearly tracks the same drift), still treat it as a match. **The cost of a false positive (one extra comment on a related-but-distinct issue) is much lower than the cost of a false negative (yet another duplicate ticket).**
+
+**Partition PRE_EXISTING into two sets:**
+
+- **KNOWN**: checks with a matching open tracking ticket. Capture the matched ticket number per check.
+- **NEW**: checks with no matching open ticket.
+
+**Then:**
+
+```bash
+# For each KNOWN check, comment on its tracking ticket.
+gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
+  "Re-observed as pre-existing failure on PR #<PR-number> (baseline-comparison
+  against \`<baseline-sha>\` confirms not introduced by this PR's diff).
+  Tracking continues here.
+
+  Last 5 lines of \`make check\` on PR branch:
+  \`\`\`
+  <redacted tail>
+  \`\`\`"
+
+# If NEW is non-empty, file ONE bundled ticket for the new checks via
+# the existing step A / A.1 / A.2 / A.3 procedure below — with the
+# ticket title listing ONLY the NEW checks (NOT the KNOWN ones).
+#
+# If NEW is empty (all pre-existing failures were already tracked): skip
+# step A entirely. The PR review's "tracking" line lists the KNOWN
+# ticket numbers; no new ticket is filed.
+```
+
+**Effect on the review template.** The "Filed as separate bug ticket" line gets replaced by a tracking block that distinguishes KNOWN from NEW. Both out-of-scope-red and standard-red templates pick up this change:
+
+- All-KNOWN (every pre-existing failure was already tracked) → `Tracking: re-observed in #X, #Y` — no new-ticket line.
+- All-NEW (no existing tracking tickets matched) → `Filed as separate bug ticket: #Z` — original shape.
+- Mixed (some KNOWN, some NEW) → both lines:
+  ```
+  Tracking (re-observed): #X (for check-A), #Y (for check-B)
+  Filed as new ticket: #Z (for check-C)
+  ```
+
+**Belt-and-suspenders.** This is a stochastic-prompt-layer fix. If the same dedupe-failure pattern surfaces again within ~2 weeks of this rule landing, file a follow-up ticket for a deterministic dispatcher-level gate at [agent-dispatcher](https://github.com/pyrycode/agent-dispatcher) (issue-create call refuses to create when an open issue with a matching title-prefix exists). Don't ship both at once — per Evidence-Based Fix Selection, defer code-level enforcement until an observed failure of the prompt-level rule.
 
 ### Out-of-scope-red template (case: all failures are pre-existing)
+
+Before composing the review body, run the **search-first dedupe** above to partition `PRE_EXISTING` into `KNOWN` (existing tracking ticket) and `NEW` (no match). The "tracking" line in the template shape below adapts to which partition is non-empty.
 
 `gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode`:
 
@@ -207,12 +279,20 @@ Baseline-comparison verdict (run against `git merge-base HEAD origin/main`):
 
 Per-QA verdict: PASS (PR did not introduce these failures).
 
-Filed as separate bug ticket: #<NEW>
+<TRACKING-BLOCK — pick the shape matching the KNOWN/NEW partition:
+  all-KNOWN  → `Tracking (re-observed): #X (for check-A), #Y (for check-B)`
+  all-NEW    → `Filed as separate bug ticket: #Z`
+  mixed      → both lines (Tracking + Filed as)
+>
 
 Routing to code-review for judgment review.
 ```
 
-Out-of-scope routing actions — four commands, all required.
+Out-of-scope routing actions. Command count depends on the KNOWN/NEW partition from the search-first dedupe:
+
+- **All-KNOWN** (every pre-existing failure has an open tracking ticket) → N `gh issue comment` calls (one per KNOWN check) + the PR review. No new ticket, no board-add, no Status-set.
+- **All-NEW** (no tracking tickets exist) → 1 `gh issue create` + 3 board commands (item-add, status-set, position) + the PR review. Identical to the pre-2026-05-23 flow.
+- **Mixed** → N comments + 1 create + 3 board commands + the PR review. The new ticket title and body list ONLY the NEW checks; the KNOWN tickets are linked from the PR review's tracking block.
 
 **Bug ticket destination = Backlog, top position.** Backlog (not Inbox) because the ticket already carries agent-validated evidence (failing test names + baseline-comparison logs proving these aren't this PR's regressions) — PO can refine without human pre-triage. Top of Backlog (not bottom) because an unmasked pre-existing failure means main has a real bug that just surfaced; it deserves priority over already-refined work below.
 
@@ -222,14 +302,32 @@ Out-of-scope routing actions — four commands, all required.
 - `updateProjectV2ItemPosition` with `afterId` omitted positions the item at the top of the project (which, when filtered to the Backlog column, equals top of Backlog).
 
 ```bash
-# A. File the bug ticket on board #1.
+# Step 0 (run BEFORE step A): execute the search-first dedupe per the
+# "Filing pre-existing-failure tickets — search-first dedupe" section
+# above. Result: PRE_EXISTING partitioned into KNOWN (with matched
+# ticket numbers) and NEW.
+#
+# For each KNOWN check, run `gh issue comment <matched-number> ...` as
+# shown in that section. The comment IS the linkage; no board operations
+# (item-add / status-set / position) needed for KNOWN — the existing
+# tracking ticket is already on the board.
+#
+# Step A runs ONLY when NEW is non-empty. If NEW is empty, skip the
+# entire `gh issue create` + board-add block below and proceed straight
+# to step C (PR review).
+
+# A. File ONE bundled bug ticket for the NEW set on board #1.
+#    Title lists ONLY the NEW checks (not the KNOWN ones — those got
+#    a comment on their existing tracking ticket instead).
 url=$(gh issue create --repo pyrycode/pyrycode \
-  --title "<PRE_EXISTING-names>: pre-existing failures unmasked by PR #<PR>" \
+  --title "<NEW-names>: pre-existing failures unmasked by PR #<PR>" \
   --label "bug" --label "size:s" \
   --body-file /tmp/bug.md)
-# /tmp/bug.md body: list of PRE_EXISTING names, the PR #, the baseline-comparison
+# /tmp/bug.md body: list of NEW check names, the PR #, the baseline-comparison
 # evidence (both make check tails, with token redaction), and "cause not yet
-# diagnosed" unless you've identified it.
+# diagnosed" unless you've identified it. If KNOWN is non-empty, also note
+# the matched tracking tickets so the new ticket's body links to them ("see
+# also #X, #Y for related-but-distinct pre-existing failures").
 
 # A.1 Add to board #1, resolve project + Status-field + Backlog-option IDs at runtime.
 item_id=$(gh project item-add 1 --owner pyrycode --url "$url" --format json --jq '.id')
