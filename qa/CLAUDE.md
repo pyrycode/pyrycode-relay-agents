@@ -176,13 +176,24 @@ Regressions (passed on baseline `<sha>`, fail on PR):
 
 Pre-existing failures (fail on both baseline AND PR branch, NOT caused by this PR):
 - TestName3
-  (tracking: see the partitioned KNOWN/NEW shape below — either re-observed in an existing tracking ticket, or filed as a new ticket)
 
-<TRACKING-BLOCK — same shape as out-of-scope-red below:
-  all-KNOWN  → `Tracking (re-observed): #X (for TestName3)`
-  all-NEW    → `Filed as separate bug ticket: #Z`
-  mixed      → both lines
->
+<!--
+  TRACKING LINE — replace the placeholder line below with ONE of these
+  shapes, picked from the KNOWN/NEW partition you computed via the
+  search-first dedupe procedure:
+
+    all-KNOWN  → "Tracking (re-observed): #X (for TestName3)"
+    all-NEW    → "Filed as separate bug ticket: #Z (for TestName3)"
+    mixed      → both lines, one per check
+                 ("Tracking (re-observed): #X (for check-A)"
+                  "Filed as new ticket: #Z (for check-B)")
+
+  This HTML comment is invisible in the rendered GitHub PR review; if a
+  verbatim paste occurs the meta-instructions degrade gracefully and the
+  visible placeholder line below remains as a fallback.
+-->
+Filed as separate bug ticket: #<NEW>  <!-- ← replace with the chosen shape per the comment above -->
+
 
 Last 5 lines of `make check`:
 ```
@@ -209,28 +220,36 @@ If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is no
 ```bash
 # Search open issues whose title contains the check name.
 # Use a literal-string match: the check name in quotes, restricted to title.
+# `--limit 100` (gh max) so a generic check name matching many issues
+# doesn't push the true tracking ticket beyond the inspection window.
 candidates=$(gh issue list --repo pyrycode/pyrycode --state open \
                --search "\"<check-name>\" in:title" \
                --json number,title,url \
-               --limit 20)
+               --limit 100)
 ```
 
-Inspect `candidates`. A candidate qualifies as a tracking ticket for THIS check if its title contains BOTH:
+**Safe-naming note.** The check name is wrapped in literal-quotes for GitHub Search's exact-string syntax. This is safe for alphanumeric + dash check names (today's convention: `snapshot-drift`, `spike-modal`, etc.). If a future check name contains GitHub-search-special characters (`:` qualifier separator, `(` `)` grouping, `+` URL encoding, embedded `"`), the search query may parse incorrectly. Either keep check names alphanumeric-plus-dash, or backslash-escape the special characters before substituting into the `--search` argument.
 
-1. The check name as a substring (case-insensitive), AND
-2. A marker word indicating it's a tracking-issue shape — one of: `pre-existing`, `unmasked`, `drift`, `flaky`, or `tracking`.
+Inspect `candidates`. A candidate qualifies as a tracking ticket for THIS check if its title contains the check name as a substring (case-insensitive) AND the title is *shaped* like a tracking ticket. Marker words that indicate tracking-ticket shape include — but are not limited to — `pre-existing`, `unmasked`, `drift`, `flaky`, `tracking`, `regression`, `bug`, `failure`, `broken`, `intermittent`. The list is illustrative, not exhaustive: use judgment on close calls.
 
-Use judgment on close calls: if a candidate's title looks like a tracking ticket the title-matching alone might miss (e.g., title is the bare check name with no marker but body clearly tracks the same drift), still treat it as a match. **The cost of a false positive (one extra comment on a related-but-distinct issue) is much lower than the cost of a false negative (yet another duplicate ticket).**
+**Cost asymmetry.** A false positive (commenting on a related-but-distinct issue) is one extra notification — recoverable, low cost. A false negative (failing to recognize a tracking ticket that DOES track this failure) creates yet another duplicate — exactly the pattern this rule exists to prevent. **When unsure, treat as a match and comment.**
+
+**Tiebreaker.** If MULTIPLE open issues match the criteria for a single check, comment on the **oldest** (lowest issue number) — that's the canonical tracker. Briefly link the other matches in the comment body so they consolidate over time: "Also see #Y, #Z which appear to track the same failure."
 
 **Partition PRE_EXISTING into two sets:**
 
-- **KNOWN**: checks with a matching open tracking ticket. Capture the matched ticket number per check.
+- **KNOWN**: checks with a matching open tracking ticket. Capture the matched ticket number per check (use the tiebreaker rule above when multiple match).
 - **NEW**: checks with no matching open ticket.
 
 **Then:**
 
 ```bash
-# For each KNOWN check, comment on its tracking ticket.
+# For each KNOWN check, comment on its tracking ticket. Replace
+# <matched-number>, <PR-number>, <baseline-sha>, and <redacted tail>
+# with actual values before invoking. The redacted tail follows the
+# same token-redaction guidance the standard-red template uses for its
+# "Last 5 lines" block (strip bearer tokens, API keys, IPs from logs
+# that might appear in dispatcher-driven test output).
 gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
   "Re-observed as pre-existing failure on PR #<PR-number> (baseline-comparison
   against \`<baseline-sha>\` confirms not introduced by this PR's diff).
@@ -246,8 +265,10 @@ gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
 # ticket title listing ONLY the NEW checks (NOT the KNOWN ones).
 #
 # If NEW is empty (all pre-existing failures were already tracked): skip
-# step A entirely. The PR review's "tracking" line lists the KNOWN
-# ticket numbers; no new ticket is filed.
+# steps A THROUGH A.3 entirely (not just the `gh issue create` line —
+# A.1 / A.2 / A.3 use `$url` from step A and would error with an undefined
+# variable). The PR review's "tracking" line lists the KNOWN ticket
+# numbers; no new ticket is filed.
 ```
 
 **Effect on the review template.** The "Filed as separate bug ticket" line gets replaced by a tracking block that distinguishes KNOWN from NEW. Both out-of-scope-red and standard-red templates pick up this change:
@@ -279,11 +300,22 @@ Baseline-comparison verdict (run against `git merge-base HEAD origin/main`):
 
 Per-QA verdict: PASS (PR did not introduce these failures).
 
-<TRACKING-BLOCK — pick the shape matching the KNOWN/NEW partition:
-  all-KNOWN  → `Tracking (re-observed): #X (for check-A), #Y (for check-B)`
-  all-NEW    → `Filed as separate bug ticket: #Z`
-  mixed      → both lines (Tracking + Filed as)
->
+<!--
+  TRACKING LINE — replace the placeholder line below with ONE of these
+  shapes, picked from the KNOWN/NEW partition you computed via the
+  search-first dedupe procedure:
+
+    all-KNOWN  → "Tracking (re-observed): #X (for check-A), #Y (for check-B)"
+    all-NEW    → "Filed as separate bug ticket: #Z"
+    mixed      → both lines, one per check
+                 ("Tracking (re-observed): #X (for check-A)"
+                  "Filed as new ticket: #Z (for check-B)")
+
+  This HTML comment is invisible in the rendered GitHub PR review; if a
+  verbatim paste occurs the meta-instructions degrade gracefully and the
+  visible placeholder line below remains as a fallback.
+-->
+Filed as separate bug ticket: #<NEW>  <!-- ← replace with the chosen shape per the comment above -->
 
 Routing to code-review for judgment review.
 ```
