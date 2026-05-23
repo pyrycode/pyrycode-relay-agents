@@ -178,31 +178,32 @@ Pre-existing failures (fail on both baseline AND PR branch, NOT caused by this P
 - TestName3
 
 <!--
-  TRACKING-LINE PLACEHOLDER — replace the line `<TRACKING-LINE>` below
-  with the appropriate shape from the KNOWN/NEW partition (computed via
-  the search-first dedupe procedure). The WHOLE line is replaceable,
-  not just the placeholder token.
+  TRACKING-LINE PLACEHOLDER — replace the line `` `<TRACKING-LINE>` ``
+  below (including the wrapping backticks) with the appropriate shape
+  from the KNOWN/NEW partition (computed via the search-first dedupe
+  procedure). The WHOLE line is replaceable, not just the token.
 
   Pick ONE shape:
 
     all-KNOWN  →  write:  Tracking (re-observed): #X (for TestName3)
-    all-NEW    →  write:  Filed as separate bug ticket: #Z (for TestName3)
+    all-NEW    →  write:  Filed as separate bug ticket: #Z
     mixed      →  write TWO lines, one per check:
                     Tracking (re-observed): #X (for check-A)
                     Filed as new ticket: #Z (for check-B)
 
-  The `<TRACKING-LINE>` token is unambiguously a whole-line marker —
-  unlike a `Filed as separate bug ticket: #<N>`-style default it can't
-  be partially-substituted into the wrong shape. If the agent fails to
-  substitute, the literal `<TRACKING-LINE>` text appears in the rendered
-  review, which is obvious enough that a human reviewer will catch it
-  (better than a half-substituted "Filed as separate bug ticket: #50"
-  that LOOKS valid but contradicts a KNOWN partition).
+  Why backticks wrap the placeholder: GitHub Markdown silently strips
+  unknown angle-bracket constructs from rendered output. A bare
+  `<TRACKING-LINE>` would render as EMPTY SPACE if the agent forgets to
+  substitute — a worse failure mode than a half-substituted "Filed as
+  separate bug ticket: #50" because the empty review LOOKS valid. The
+  backticks force inline-code rendering, so the unsubstituted marker
+  appears as the visible string `<TRACKING-LINE>` in the rendered PR
+  review — obvious enough that a human reviewer will catch it.
 
   HTML comments are invisible in GitHub Markdown rendering — this block
   doesn't show up in the rendered PR review body.
 -->
-<TRACKING-LINE>
+`<TRACKING-LINE>`
 
 
 Last 5 lines of `make check`:
@@ -323,10 +324,10 @@ Baseline-comparison verdict (run against `git merge-base HEAD origin/main`):
 Per-QA verdict: PASS (PR did not introduce these failures).
 
 <!--
-  TRACKING-LINE PLACEHOLDER — replace the line `<TRACKING-LINE>` below
-  with the appropriate shape from the KNOWN/NEW partition (computed via
-  the search-first dedupe procedure). The WHOLE line is replaceable,
-  not just the placeholder token.
+  TRACKING-LINE PLACEHOLDER — replace the line `` `<TRACKING-LINE>` ``
+  below (including the wrapping backticks) with the appropriate shape
+  from the KNOWN/NEW partition (computed via the search-first dedupe
+  procedure). The WHOLE line is replaceable, not just the token.
 
   Pick ONE shape:
 
@@ -336,16 +337,19 @@ Per-QA verdict: PASS (PR did not introduce these failures).
                     Tracking (re-observed): #X (for check-A)
                     Filed as new ticket: #Z (for check-B)
 
-  The `<TRACKING-LINE>` token is unambiguously a whole-line marker — if
-  the agent fails to substitute, the literal text appears in the rendered
-  review, which is obvious enough that a human reviewer will catch it
-  (preferable to a half-substituted "Filed as separate bug ticket: #50"
-  that LOOKS valid but contradicts a KNOWN partition).
+  Why backticks wrap the placeholder: GitHub Markdown silently strips
+  unknown angle-bracket constructs from rendered output. A bare
+  `<TRACKING-LINE>` would render as EMPTY SPACE if the agent forgets to
+  substitute — a worse failure mode than a half-substituted "Filed as
+  separate bug ticket: #50" because the empty review LOOKS valid. The
+  backticks force inline-code rendering, so the unsubstituted marker
+  appears as the visible string `<TRACKING-LINE>` in the rendered PR
+  review — obvious enough that a human reviewer will catch it.
 
   HTML comments are invisible in GitHub Markdown rendering — this block
   doesn't show up in the rendered PR review body.
 -->
-<TRACKING-LINE>
+`<TRACKING-LINE>`
 
 Routing to code-review for judgment review.
 ```
