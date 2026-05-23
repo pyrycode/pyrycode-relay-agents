@@ -174,25 +174,35 @@ Regressions (passed on baseline `<sha>`, fail on PR):
 - TestName1
 - TestName2
 
-Pre-existing failures (fail on both baseline AND PR branch, NOT caused by this PR):
+Pre-existing failures (fail on both baseline AND PR branch, NOT caused by this PR — see tracking block below):
 - TestName3
 
 <!--
-  TRACKING LINE — replace the placeholder line below with ONE of these
-  shapes, picked from the KNOWN/NEW partition you computed via the
-  search-first dedupe procedure:
+  TRACKING-LINE PLACEHOLDER — replace the line `<TRACKING-LINE>` below
+  with the appropriate shape from the KNOWN/NEW partition (computed via
+  the search-first dedupe procedure). The WHOLE line is replaceable,
+  not just the placeholder token.
 
-    all-KNOWN  → "Tracking (re-observed): #X (for TestName3)"
-    all-NEW    → "Filed as separate bug ticket: #Z (for TestName3)"
-    mixed      → both lines, one per check
-                 ("Tracking (re-observed): #X (for check-A)"
-                  "Filed as new ticket: #Z (for check-B)")
+  Pick ONE shape:
 
-  This HTML comment is invisible in the rendered GitHub PR review; if a
-  verbatim paste occurs the meta-instructions degrade gracefully and the
-  visible placeholder line below remains as a fallback.
+    all-KNOWN  →  write:  Tracking (re-observed): #X (for TestName3)
+    all-NEW    →  write:  Filed as separate bug ticket: #Z (for TestName3)
+    mixed      →  write TWO lines, one per check:
+                    Tracking (re-observed): #X (for check-A)
+                    Filed as new ticket: #Z (for check-B)
+
+  The `<TRACKING-LINE>` token is unambiguously a whole-line marker —
+  unlike a `Filed as separate bug ticket: #<N>`-style default it can't
+  be partially-substituted into the wrong shape. If the agent fails to
+  substitute, the literal `<TRACKING-LINE>` text appears in the rendered
+  review, which is obvious enough that a human reviewer will catch it
+  (better than a half-substituted "Filed as separate bug ticket: #50"
+  that LOOKS valid but contradicts a KNOWN partition).
+
+  HTML comments are invisible in GitHub Markdown rendering — this block
+  doesn't show up in the rendered PR review body.
 -->
-Filed as separate bug ticket: #<NEW>  <!-- ← replace with the chosen shape per the comment above -->
+<TRACKING-LINE>
 
 
 Last 5 lines of `make check`:
@@ -246,10 +256,16 @@ Inspect `candidates`. A candidate qualifies as a tracking ticket for THIS check 
 ```bash
 # For each KNOWN check, comment on its tracking ticket. Replace
 # <matched-number>, <PR-number>, <baseline-sha>, and <redacted tail>
-# with actual values before invoking. The redacted tail follows the
-# same token-redaction guidance the standard-red template uses for its
-# "Last 5 lines" block (strip bearer tokens, API keys, IPs from logs
-# that might appear in dispatcher-driven test output).
+# with actual values before invoking.
+#
+# Redacted tail — explicit guidance (applies to every `<redacted tail>`
+# placeholder in this file, including the standard-red template's "Last
+# 5 lines" block): strip bearer tokens (anything matching `Bearer \S+`,
+# `Authorization: \S+`), API keys (long hex/base64 strings near
+# auth/token/key context), and IP addresses (`\d+\.\d+\.\d+\.\d+`) from
+# the captured `make check` / `make e2e` output before pasting into the
+# comment body. Dispatcher-driven test output may contain these when
+# tests hit live endpoints during baseline runs.
 gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
   "Re-observed as pre-existing failure on PR #<PR-number> (baseline-comparison
   against \`<baseline-sha>\` confirms not introduced by this PR's diff).
@@ -271,14 +287,20 @@ gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
 # numbers; no new ticket is filed.
 ```
 
-**Effect on the review template.** The "Filed as separate bug ticket" line gets replaced by a tracking block that distinguishes KNOWN from NEW. Both out-of-scope-red and standard-red templates pick up this change:
+**Effect on the review template.** The `<TRACKING-LINE>` placeholder in both the out-of-scope-red and standard-red templates gets replaced with ONE of these three canonical shapes, matching the KNOWN/NEW partition. **All three forms use the parenthetical-with-attribution style** (`Tracking (re-observed): #X (for check-A)`) for consistency — there is no "with 'in', no attribution" variant; pick from these only:
 
-- All-KNOWN (every pre-existing failure was already tracked) → `Tracking: re-observed in #X, #Y` — no new-ticket line.
-- All-NEW (no existing tracking tickets matched) → `Filed as separate bug ticket: #Z` — original shape.
-- Mixed (some KNOWN, some NEW) → both lines:
+- **All-KNOWN** (every pre-existing failure was already tracked):
   ```
   Tracking (re-observed): #X (for check-A), #Y (for check-B)
-  Filed as new ticket: #Z (for check-C)
+  ```
+- **All-NEW** (no existing tracking tickets matched):
+  ```
+  Filed as separate bug ticket: #Z
+  ```
+- **Mixed** (some KNOWN, some NEW) — write BOTH lines, with per-check attribution so the linkage is unambiguous:
+  ```
+  Tracking (re-observed): #X (for check-A)
+  Filed as new ticket: #Z (for check-B)
   ```
 
 **Belt-and-suspenders.** This is a stochastic-prompt-layer fix. If the same dedupe-failure pattern surfaces again within ~2 weeks of this rule landing, file a follow-up ticket for a deterministic dispatcher-level gate at [agent-dispatcher](https://github.com/pyrycode/agent-dispatcher) (issue-create call refuses to create when an open issue with a matching title-prefix exists). Don't ship both at once — per Evidence-Based Fix Selection, defer code-level enforcement until an observed failure of the prompt-level rule.
@@ -301,21 +323,29 @@ Baseline-comparison verdict (run against `git merge-base HEAD origin/main`):
 Per-QA verdict: PASS (PR did not introduce these failures).
 
 <!--
-  TRACKING LINE — replace the placeholder line below with ONE of these
-  shapes, picked from the KNOWN/NEW partition you computed via the
-  search-first dedupe procedure:
+  TRACKING-LINE PLACEHOLDER — replace the line `<TRACKING-LINE>` below
+  with the appropriate shape from the KNOWN/NEW partition (computed via
+  the search-first dedupe procedure). The WHOLE line is replaceable,
+  not just the placeholder token.
 
-    all-KNOWN  → "Tracking (re-observed): #X (for check-A), #Y (for check-B)"
-    all-NEW    → "Filed as separate bug ticket: #Z"
-    mixed      → both lines, one per check
-                 ("Tracking (re-observed): #X (for check-A)"
-                  "Filed as new ticket: #Z (for check-B)")
+  Pick ONE shape:
 
-  This HTML comment is invisible in the rendered GitHub PR review; if a
-  verbatim paste occurs the meta-instructions degrade gracefully and the
-  visible placeholder line below remains as a fallback.
+    all-KNOWN  →  write:  Tracking (re-observed): #X (for check-A), #Y (for check-B)
+    all-NEW    →  write:  Filed as separate bug ticket: #Z
+    mixed      →  write TWO lines, one per check:
+                    Tracking (re-observed): #X (for check-A)
+                    Filed as new ticket: #Z (for check-B)
+
+  The `<TRACKING-LINE>` token is unambiguously a whole-line marker — if
+  the agent fails to substitute, the literal text appears in the rendered
+  review, which is obvious enough that a human reviewer will catch it
+  (preferable to a half-substituted "Filed as separate bug ticket: #50"
+  that LOOKS valid but contradicts a KNOWN partition).
+
+  HTML comments are invisible in GitHub Markdown rendering — this block
+  doesn't show up in the rendered PR review body.
 -->
-Filed as separate bug ticket: #<NEW>  <!-- ← replace with the chosen shape per the comment above -->
+<TRACKING-LINE>
 
 Routing to code-review for judgment review.
 ```
