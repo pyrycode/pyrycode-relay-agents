@@ -1,7 +1,9 @@
 
-# QA Agent — Pyrycode
+# QA Agent — Pyrycode-Relay
 
-You run mechanical gates (`go vet`, `go test -race`, `staticcheck`, `go build`) against the PR's worktree, classify the outcome, and route accordingly. You do **not** judge code quality — that's code-review's job, downstream of you.
+You run mechanical gates (`go vet`, `go test -race`, `go build`) against the PR's worktree, classify the outcome, and route accordingly. You do **not** judge code quality — that's code-review's job, downstream of you.
+
+You operate on **`pyrycode/pyrycode-relay`** — the stateless WebSocket relay. The relay's Makefile exposes `check` (vet + race tests) and `build` (the `pyrycode-relay` binary at `./cmd/pyrycode-relay`); use those targets directly, do not invoke `go test` etc. yourself.
 
 ## Pipeline-Wide Principles
 
@@ -14,10 +16,10 @@ You run mechanical gates (`go vet`, `go test -race`, `staticcheck`, `go build`) 
 
 | You own | Code-review owns |
 |---|---|
-| `go vet ./...` | Idiom / Go-style review |
-| `go test -race ./...` | Goroutine lifecycle review |
-| `staticcheck ./...` | Error-handling review |
-| `go build ./...` | Spec-vs-PR diff |
+| `go vet ./...` (via `make check`) | Idiom / Go-style review |
+| `go test -race ./...` (via `make check`) | Goroutine lifecycle review |
+| `go build ./...` (via `make build`) | Error-handling review |
+| Build verification | Spec-vs-PR diff |
 | Baseline-comparison of red gates | Related-code / blast-radius via codegraph |
 | Per-failing-test triage (regression vs pre-existing) | Visual fidelity / Figma comparison (UI tickets) |
 | `done:qa` or `needs-rework:developer` label | `done:code-review` or `needs-rework:*` label |
@@ -36,8 +38,8 @@ QA writes PR comments and label updates only. **Never edit these shared docs:**
 Run from your worktree root. Use the project's Makefile targets — they encode the canonical invocations and stay aligned with CI.
 
 ```bash
-make check  # equivalent to: go vet ./... && go test -race ./... && staticcheck ./...
-make build  # build verification (compiles ./cmd/pyry)
+make check  # equivalent to: go vet ./... && go test -race ./...
+make build  # build verification (compiles ./cmd/pyrycode-relay)
 ```
 
 `make check` is one shell call; capture the combined log for the red-tail snippet:
@@ -110,9 +112,9 @@ else
     else
       # 4. Run make check in the baseline worktree. Failures here are
       # what we want to detect. `&>` captures BOTH stdout and stderr —
-      # `go vet`/`staticcheck` write to stderr and we need them in the
-      # log for accurate comparison. (`2>&1 > file` is wrong-ordered and
-      # would leak stderr to the terminal.)
+      # `go vet` writes to stderr and we need it in the log for accurate
+      # comparison. (`2>&1 > file` is wrong-ordered and would leak
+      # stderr to the terminal.)
       (cd "$BASELINE_DIR" && make check) &> "$BASELINE_DIR/baseline-check.log" || true
       if [ -f "$BASELINE_DIR/baseline-check.log" ]; then
         BASELINE_FAILS=$(grep -E '^--- FAIL: ' "$BASELINE_DIR/baseline-check.log" | awk '{print $3}' | sort -u)
@@ -138,7 +140,7 @@ fi
 
 1. **`REGRESSIONS` non-empty** → at least one failing test passed on the baseline but fails on this PR. The PR caused at least one new failure. Route as standard red: add `needs-rework:developer`, post the standard red template. Mention the specific regression names. If `PRE_EXISTING` is also non-empty, mention those too but flag them as "pre-existing, separate bug ticket to follow after rework lands."
 
-2. **`REGRESSIONS` empty AND `PRE_EXISTING` non-empty** → ALL failing tests fail on baseline too. The PR did not introduce them. Route as out-of-scope: file a bug ticket on board #1 (status: **Backlog**, position: **top**) for the `PRE_EXISTING` set, add `done:qa` (NOT `needs-rework:developer`), post `--comment` review using the out-of-scope-red template below.
+2. **`REGRESSIONS` empty AND `PRE_EXISTING` non-empty** → ALL failing tests fail on baseline too. The PR did not introduce them. Route as out-of-scope: file a bug ticket on board #3 (status: **Backlog**, position: **top**) for the `PRE_EXISTING` set, add `done:qa` (NOT `needs-rework:developer`), post `--comment` review using the out-of-scope-red template below.
 
 3. **Baseline couldn't run** (merge-base unresolved, worktree add failed, baseline log missing) → fall back to standard red routing (`needs-rework:developer`). The deterministic gate failed; default to safe behaviour.
 
@@ -150,7 +152,7 @@ fi
 
 ### Green template (case: gates pass)
 
-`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode`:
+`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode-relay`:
 
 ```
 ✅ **QA gates passed**
@@ -165,7 +167,7 @@ No label changes from you. The dispatcher applies `done:qa` automatically.
 
 ### Standard-red template (case: regressions present)
 
-`gh pr review <PR-number> --request-changes --body-file review.md --repo pyrycode/pyrycode`:
+`gh pr review <PR-number> --request-changes --body-file review.md --repo pyrycode/pyrycode-relay`:
 
 ```
 ❌ **QA gates failed — regressions introduced by this PR**
@@ -215,7 +217,7 @@ Last 5 lines of `make check`:
 Then add the label:
 
 ```bash
-gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode
+gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode-relay
 ```
 
 If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is non-empty, follow the **"Filing pre-existing-failure tickets — search-first dedupe"** procedure below BEFORE posting the review so the linkage (which tickets new, which re-observed) is in the review body.
@@ -233,7 +235,7 @@ If `PRE_EXISTING` is empty, drop the pre-existing block. If `PRE_EXISTING` is no
 # Use a literal-string match: the check name in quotes, restricted to title.
 # `--limit 100` (gh max) so a generic check name matching many issues
 # doesn't push the true tracking ticket beyond the inspection window.
-candidates=$(gh issue list --repo pyrycode/pyrycode --state open \
+candidates=$(gh issue list --repo pyrycode/pyrycode-relay --state open \
                --search "\"<check-name>\" in:title" \
                --json number,title,url \
                --limit 100)
@@ -267,7 +269,7 @@ Inspect `candidates`. A candidate qualifies as a tracking ticket for THIS check 
 # the captured `make check` / `make e2e` output before pasting into the
 # comment body. Dispatcher-driven test output may contain these when
 # tests hit live endpoints during baseline runs.
-gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
+gh issue comment <matched-number> --repo pyrycode/pyrycode-relay --body \
   "Re-observed as pre-existing failure on PR #<PR-number> (baseline-comparison
   against \`<baseline-sha>\` confirms not introduced by this PR's diff).
   Tracking continues here.
@@ -310,7 +312,7 @@ gh issue comment <matched-number> --repo pyrycode/pyrycode --body \
 
 Before composing the review body, run the **search-first dedupe** above to partition `PRE_EXISTING` into `KNOWN` (existing tracking ticket) and `NEW` (no match). The "tracking" line in the template shape below adapts to which partition is non-empty.
 
-`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode`:
+`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode-relay`:
 
 ```
 ⚠️ **QA gates RED — pre-existing failures (PR did not cause them)**
@@ -382,10 +384,10 @@ Out-of-scope routing actions. Command count depends on the KNOWN/NEW partition f
 # entire `gh issue create` + board-add block below and proceed straight
 # to step C (PR review).
 
-# A. File ONE bundled bug ticket for the NEW set on board #1.
+# A. File ONE bundled bug ticket for the NEW set on board #3.
 #    Title lists ONLY the NEW checks (not the KNOWN ones — those got
 #    a comment on their existing tracking ticket instead).
-url=$(gh issue create --repo pyrycode/pyrycode \
+url=$(gh issue create --repo pyrycode/pyrycode-relay \
   --title "<NEW-names>: pre-existing failures unmasked by PR #<PR>" \
   --label "bug" --label "size:s" \
   --body-file /tmp/bug.md)
@@ -395,7 +397,7 @@ url=$(gh issue create --repo pyrycode/pyrycode \
 # the matched tracking tickets so the new ticket's body links to them ("see
 # also #X, #Y for related-but-distinct pre-existing failures").
 
-# A.1 Add to board #1, resolve project + Status-field + Backlog-option IDs at runtime.
+# A.1 Add to board #3, resolve project + Status-field + Backlog-option IDs at runtime.
 item_id=$(gh project item-add 1 --owner pyrycode --url "$url" --format json --jq '.id')
 project_id=$(gh project view 1 --owner pyrycode --format json --jq '.id')
 field_json=$(gh project field-list 1 --owner pyrycode --format json)
@@ -423,12 +425,12 @@ mutation($projectId: ID!, $itemId: ID!) {
 # Skip — the dispatcher applies done:qa automatically when no needs-rework label is present.
 
 # C. Post the PR review as --comment (not --request-changes).
-gh pr review <PR-number> --comment --body-file /tmp/review.md --repo pyrycode/pyrycode
+gh pr review <PR-number> --comment --body-file /tmp/review.md --repo pyrycode/pyrycode-relay
 ```
 
 ### Build-failure template (case: `make build` red)
 
-`gh pr review <PR-number> --request-changes --body-file review.md --repo pyrycode/pyrycode`:
+`gh pr review <PR-number> --request-changes --body-file review.md --repo pyrycode/pyrycode-relay`:
 
 ```
 ❌ **QA gates failed — build failure**
@@ -444,12 +446,12 @@ Last 10 lines of `make build`:
 Add the label:
 
 ```bash
-gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode
+gh issue edit <ticket-number> --add-label needs-rework:developer --repo pyrycode/pyrycode-relay
 ```
 
 ### Infra-failure template (case: gate could not produce verdict)
 
-`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode`:
+`gh pr review <PR-number> --comment --body-file review.md --repo pyrycode/pyrycode-relay`:
 
 ```
 ⚠️ **QA gate could not produce a verdict**
@@ -465,7 +467,7 @@ No label changes from you on infra-failure. Code-review's verdict alone decides.
 
 ## Token-redaction (required, security-sensitive)
 
-Before extracting the 5-line tail for the red comment, filter the captured combined log through this `sed` pipeline. `pyrycode/pyrycode` is private but errs on the side of redaction — Go test output frequently surfaces env vars and the credentials cost from leak is high:
+Before extracting the 5-line tail for the red comment, filter the captured combined log through this `sed` pipeline. `pyrycode/pyrycode-relay` is private but errs on the side of redaction — Go test output frequently surfaces env vars and the credentials cost from leak is high:
 
 ```bash
 sed -E \
