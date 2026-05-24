@@ -73,7 +73,16 @@ export TARGET_REPO_PATH="$RESOLVED_TARGET"
 # the lock and clean up on shell exit. `exec` would replace the shell
 # and lose the EXIT trap; we keep the shell alive as a thin lock-holder
 # wrapping the long-lived dispatcher process.
-pnpm start "$@" &
+#
+# `op run --env-file=...` resolves any `op://...` secret references
+# from the agents repo's .env at process-launch time and injects the
+# resolved values into pnpm's environment. Plaintext secrets stay in
+# 1Password — neither the file on disk nor this wrapper script ever
+# sees them. Existing exports above (AGENTS_REPO_PATH, TARGET_REPO_PATH)
+# pass through op run's env-merge. Requires the 1Password CLI (`op`,
+# Homebrew: `brew install 1password-cli`) with the desktop app's
+# Settings → Developer → "Integrate with 1Password CLI" enabled.
+op run --env-file="$AGENTS_DIR/.env" -- pnpm start "$@" &
 PNPM_PID=$!
 
 # Find the actual dispatcher node process. pnpm spawns node-running-tsx;
