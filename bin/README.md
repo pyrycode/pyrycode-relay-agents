@@ -28,11 +28,11 @@ From `agents/`:
 
 From anywhere via absolute path:
 ```
-~/Workspace/Projects/pyrycode/agents/bin/pyry-drain
+~/Workspace/Projects/pyrycode-agents/bin/pyry-drain
 ```
 
 To run by short name from anywhere, add this dir to your PATH:
 ```sh
-export PATH="$HOME/Workspace/Projects/pyrycode/agents/bin:$PATH"
+export PATH="$HOME/Workspace/Projects/pyrycode-agents/bin:$PATH"
 ```
 (Personal preference; not required for the scripts to work.)
