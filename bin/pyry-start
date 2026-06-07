@@ -76,17 +76,29 @@ export TARGET_REPO_PATH="$RESOLVED_TARGET"
 #
 # `op run --env-file=...` resolves any `op://...` secret references
 # from the agents repo's .env at process-launch time and injects the
-# resolved values into pnpm's environment. Plaintext secrets stay in
-# 1Password — neither the file on disk nor this wrapper script ever
-# sees them. Existing exports above (AGENTS_REPO_PATH, TARGET_REPO_PATH)
-# pass through op run's env-merge. Requires the 1Password CLI (`op`,
-# Homebrew: `brew install 1password-cli`) with the desktop app's
-# Settings → Developer → "Integrate with 1Password CLI" enabled.
-op run --env-file="$AGENTS_DIR/.env" -- pnpm start "$@" &
-PNPM_PID=$!
+# resolved values into the dispatcher's environment. Plaintext secrets
+# stay in 1Password — neither the file on disk nor this wrapper script
+# ever sees them. Existing exports above (AGENTS_REPO_PATH,
+# TARGET_REPO_PATH) pass through op run's env-merge. Requires the
+# 1Password CLI (`op`, Homebrew: `brew install 1password-cli`) with the
+# desktop app's Settings → Developer → "Integrate with 1Password CLI"
+# enabled.
+#
+# tsx is invoked DIRECTLY here, NOT via `pnpm start`. Under `op run`,
+# pnpm reacts to the first Ctrl+C (SIGINT) by sending SIGTERM to its
+# script child — which kills tsx (exit 143) and tears the whole stack
+# down BEFORE the dispatcher's own SIGINT handler enters drain mode, so
+# the in-flight dispatch dies mid-run instead of finishing. Reproduced
+# 2026-06-07: `op run -> pnpm -> tsx -> node` injects a spurious SIGTERM
+# on a single Ctrl+C; `op run -> tsx -> node` (and bare `pnpm -> tsx ->
+# node`) drain cleanly. Do NOT reintroduce the `pnpm start` indirection
+# on this launch path. (`pnpm install` above still syncs deps; cwd is
+# the dispatcher dir, so ./node_modules/.bin/tsx resolves.)
+op run --env-file="$AGENTS_DIR/.env" -- ./node_modules/.bin/tsx src/dispatch-bin.ts "$@" &
+LAUNCH_PID=$!
 
-# Find the actual dispatcher node process. pnpm spawns node-running-tsx;
-# pgrep's pattern matches the inner node process. Under cross-fork
+# Find the actual dispatcher node process. op run execs tsx, which
+# spawns the inner node process; pgrep's pattern matches it. Under cross-fork
 # concurrent usage (≥2 dispatchers alive across different agents-fork
 # repos), `pgrep -f ... | head -1` always returns the oldest (lowest)
 # matching PID, not the one this pyry-start spawned. We disambiguate by
@@ -107,12 +119,12 @@ while [ $i -lt 30 ]; do
   sleep 0.1
   i=$((i + 1))
 done
-[ -z "$DISPATCHER_PID" ] && DISPATCHER_PID="$PNPM_PID"  # fallback
+[ -z "$DISPATCHER_PID" ] && DISPATCHER_PID="$LAUNCH_PID"  # fallback
 
 # Register traps BEFORE writing the lock file. If the user presses
 # Ctrl+C between `cat > $LOCK_FILE` and the trap install, the wrapper
 # would exit with default SIGINT handling and leave a stale lock
-# (background pnpm/node still alive, but no cleanup). Installing the
+# (background op-run/node still alive, but no cleanup). Installing the
 # traps first closes that race window.
 #
 # SIGINT is deliberately *ignored* in this wrapper (the dispatcher
@@ -120,7 +132,7 @@ done
 # wrapper to react). Without `trap '' INT` the wrapper's INT handler
 # would interrupt `wait` on the first Ctrl+C and the script would
 # exit; the user's interactive shell would then grab the terminal
-# back while pnpm/node are still draining, and the in-flight ticket's
+# back while op-run/node are still draining, and the in-flight ticket's
 # stdout would bleed into the post-prompt shell.
 #
 # EXIT and TERM fire the lock cleanup. SIGKILL still leaves a stale
@@ -143,4 +155,4 @@ EOF
 # 0, wait returns 127, `|| true` swallows it, tight infinite loop).
 # `2>/dev/null || true` swallows the rare 127-from-not-our-child case
 # that could arise if a stray HUP/USR1 ever lands and a handler runs.
-wait "$PNPM_PID" 2>/dev/null || true
+wait "$LAUNCH_PID" 2>/dev/null || true
