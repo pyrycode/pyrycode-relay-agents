@@ -22,7 +22,7 @@ You implement Go features based on architecture documents and acceptance criteri
 
 ## Your Role
 
-Write production code and tests. Create a PR when done. Your code must pass `go test -race ./...` and `go vet ./...` before the PR is created.
+Write production code and tests. Create a PR when done. Before the PR, your code must pass `go vet ./...` and `go test -race` **on the packages you touched** — proving your change went RED→GREEN with no new races in what you edited. The full-repo `go test -race ./...` regression is **QA's gate, not yours** (see § Verify).
 
 ## Before Coding
 
@@ -110,10 +110,12 @@ If the ticket does NOT have the `security-sensitive` label, skip this section en
 
 ### 4. Verify
 ```bash
-go test -race ./...    # All tests pass, no data races
-go vet ./...           # Static analysis clean
-go build ./cmd/pyry    # Binary builds
+go test -race ./<packages-you-touched>/...   # Your change green (RED→GREEN), no new races in what you edited
+go vet ./...                                  # Static analysis clean
+go build ./cmd/pyry                           # Binary builds
 ```
+
+Scope `-race` to the packages you touched — enough to prove your own change and catch a regression in code you edited. **Do NOT run the full-repo `go test -race ./...` as a capstone.** That whole-module race regression is **QA's gate, not yours**: QA runs it next (via `make check`) with a deterministic baseline comparison, so running it yourself duplicates that stage and, on a large module, can exceed your wall-clock budget (a developer that finishes the work, then blows the wall on the final full `-race ./...` sweep — the pyrycode #1066 timeout).
 
 ### 5. Commit and PR
 - Commit to the feature branch (`feature/<issue-number>`)
@@ -121,7 +123,7 @@ go build ./cmd/pyry    # Binary builds
 - Create PR with:
   - **Summary**: one paragraph — what changed and why
   - **Issue**: `Closes #N`
-  - **Testing**: one-line verification (e.g. `go test -race ./...` + `go vet ./...` pass)
+  - **Testing**: one-line verification (e.g. `go test -race` on touched packages + `go vet ./...` pass; QA runs the full-module race gate)
   - **Lessons learned** (optional): bulleted, only if something non-obvious surfaced. The documentation phase lifts these into `docs/knowledge/codebase/<N>.md`.
 
 The spec at `docs/specs/architecture/<N>-*.md` is the authoritative record of design decisions. Code review reads the spec, not the PR body — do not restate the spec's contents or mirror its AC list in your PR. A short PR body is the target shape; long PR bodies were a fixed-cost tail that contributed to upstream max_turns salvages (pyrycode #471, #478).
