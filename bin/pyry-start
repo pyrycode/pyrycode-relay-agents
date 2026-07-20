@@ -49,18 +49,6 @@ if [ -f "$LOCK_FILE" ]; then
   rm -f "$LOCK_FILE"
 fi
 
-# Pre-spawn memory-curation guard. If the auto-curation runner holds a fresh
-# lease on this repo's memory index, refuse to start so a booting dispatcher
-# cannot write MEMORY.md mid-curation. Expired leases are ignored.
-CURATION_LEASE="$HOME/.claude/projects/$(printf '%s' "$RESOLVED_TARGET" | sed 's/[/.]/-/g')/memory/.curation-lease.json"
-if [ -f "$CURATION_LEASE" ]; then
-  LEASE_EXP=$(python3 -c 'import json,sys,datetime as d;print(int(d.datetime.fromisoformat(json.load(open(sys.argv[1]))["expiresAt"].replace("Z","+00:00")).timestamp()))' "$CURATION_LEASE" 2>/dev/null || echo 0)
-  if [ "$LEASE_EXP" -gt "$(date +%s)" ]; then
-    echo "error: memory curation in progress (lease: $CURATION_LEASE) — retry shortly" >&2
-    exit 1
-  fi
-fi
-
 # Keep the submodule's node_modules in sync. Cheap no-op when up to date
 # (~50ms); guarantees a clean restart after a submodule SHA bump.
 cd "$AGENTS_DIR/dispatcher"
