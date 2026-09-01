@@ -103,7 +103,7 @@ The line count covers production code. Tests scale roughly linearly with it (TDD
 - More than 5 new exported types or interfaces
 - More than 10 call sites in a refactor (Strangler Fig the rename instead)
 - More than 5 acceptance criteria
-- The body needs the word "and" to describe what changes ("introduce the pool **and** wire the control plane")
+- The body carries more than one deliverable — two things that land and are checked separately (not merely two clauses joined by "and"; one deliverable with a clumsy title gets the title rewritten)
 - Any always-split pattern from the list below
 
 These are mechanical. If the ticket trips one, you split — you do not size it S "because the parts are coupled" or "because the seams aren't obvious." Couple-sounding work splits cleanly more often than not; the architect's spec on each child surfaces seams the parent body couldn't.
@@ -112,17 +112,56 @@ These are mechanical. If the ticket trips one, you split — you do not size it 
 
 When you and the architect independently arrive at the same size, that's two checks and a stronger signal. When you disagree, the architect's view wins because they've sketched the actual design surface.
 
+**There is also a floor, which the red lines above do not have.** A slice whose only deliverable is consumed by exactly one sibling in the same family is not a ticket; it is part of that sibling. A name minted for one caller, a type only the next slice reads, a helper nobody outside the family calls — those are lines inside a ticket, not tickets. Merge them into the slice that consumes them. The test is whether the slice changes something observable on its own.
+
+This does not conflict with the shared-test-infrastructure split pattern below. That pattern's trigger is reuse by **more than one** ticket. One consumer means one ticket.
+
+Measured on `pyrycode/pyrycode` 2026-09-01: five tickets to commit one captured test file, each carrying 4-5 acceptance criteria against a ceiling of 5, $213 spent by mid-morning against a projection near $330.
+
 ## Sizing Test
 
-> "Can you describe this ticket in one sentence without using 'and'?"
+> "Does this ticket have more than one deliverable?"
 
-If not, it's two tickets. This test does the work that file-count was trying to imitate: cross-package work that needs real coordination almost always needs an "and" in its description ("introduce the pool **and** wire the control plane **and** update main.go"). The "and" signal is one of the quantitative red lines above — listed here for emphasis because it's the cheapest to apply during refinement.
+A deliverable is something that lands and can be checked on its own: a behaviour, a contract, a gate that reddens. Two of them is two tickets. One of them is one ticket, however the title reads.
+
+**The test is about deliverables, not about the word "and".** An earlier version asked whether you could describe the ticket in one sentence without using "and", and it fired on grammar rather than on work. Measured on `pyrycode/pyrycode` 2026-09-01: #1940, "define the fixture record **and** mint its fixture name", was split on the conjunction alone. Both halves landed in one file, in one commit, proven by one test run. That is one deliverable with a clumsy title — rewrite the title, don't cut the work. The lesson is universal; the pipeline is the same here.
+
+Cross-module work that needs real coordination usually does read as several deliverables, so the signal survives where it was doing useful work. Apply it before you start counting lines.
 
 **If it's bigger than S, split it.** One ticket per concern. The architect will flag oversized tickets back to you with a proposed split (see the architect agent's Workflow → Size check section), but catching it during refinement is cheaper.
 
 ## Splitting
 
-**Default to split.** A ticket that's "too small" is never a problem — one that's too big wastes $5-10 in burned developer turns. Pyrycode #29 and #40 both hit max_turns at 51 ($3.84 and $5.16 respectively) and required JSONL-replay recovery. Both should have been split further.
+**Default to split — and know what each side of that default costs.** Measured on `pyrycode/pyrycode` across 88 recent tickets on 2026-09-01, priced from the agent session transcripts. Same five-agent pipeline runs here, so the shape carries even though the absolute numbers were measured there:
+
+| Outcome | Measured cost |
+|---|---|
+| One ticket, all agents, clean run | ~$32 |
+| One ticket needing a second developer pass | ~$49 median, worst observed $56 |
+| Extra cost of that rework pass | ~$16 |
+| Extra cost of one more split | ~$32 |
+
+An over-split ticket is **not** free. It costs about twice the rework pass it avoids. Earlier versions of this guide said a ticket that's "too small" is never a problem and priced an oversized one at $5-10; the first claim was wrong and the second priced the developer leg only, which is about a fifth of the pipeline.
+
+**What still justifies leaning to split is the parked ticket, not the dollars.** When a developer run exhausts its budget the dispatcher salvages the work into a draft PR, labels the ticket, and stops. Nothing re-dispatches it. It waits for a human, and that interruption is worth far more than $16. **When graceful resumption lands, this default flips** — an exhausted run that simply continues costs the rework pass and nothing else, and bundling becomes the cheaper choice. Until then lean to split, inside the floor and the depth cap below, both of which bind regardless. Pyrycode #29 and #40 both hit max_turns at 51 ($3.84 and $5.16 respectively) and required JSONL-replay recovery. Both should have been split further.
+
+### Split depth: stop at two
+
+**Before you split, walk the parent chain. A ticket that is already a grandchild does not get split again.**
+
+```bash
+gh api graphql -f query='query($owner:String!,$repo:String!,$num:Int!){repository(owner:$owner,name:$repo){issue(number:$num){number parent{number parent{number}}}}}' \
+  -f owner="$(gh repo view --json owner --jq .owner.login)" \
+  -f repo="$(gh repo view --json name --jq .name)" \
+  -F num=<TICKET> \
+  --jq '.data.repository.issue | "parent \(.parent.number // "none") grandparent \(.parent.parent.number // "none")"'
+```
+
+If `grandparent` comes back as anything other than `none`, **do not split.** Add `needs-human:sizing` to the ticket, comment with the split you would have made and why, and stop. A human decides.
+
+This is a hard gate, not a preference. It exists because on `pyrycode/pyrycode` every soft rule in that guide, including one written specifically to describe this pattern, failed to stop a recursive split. Measured 2026-09-01: #1925 became #1937, which became #1940, which became #1943 and #1944 — three levels in about seventy minutes, no code written between 03:47 and 05:00, and each child's body longer than the parent it was cut from. The same shape was recorded on the #1714 family on 2026-08-24 and writing it down did not prevent the repeat. A rule that has now failed twice needs a check of a different kind, which is what the query above is.
+
+Depth is measured from the sub-issue chain you already create when splitting. Keep linking each child to its parent via `addSubIssue`, or this gate goes blind.
 
 ### Always-split patterns
 
