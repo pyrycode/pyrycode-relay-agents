@@ -157,7 +157,7 @@ gh api graphql -f query='query($owner:String!,$repo:String!,$num:Int!){repositor
   --jq '.data.repository.issue | "parent \(.parent.number // "none") grandparent \(.parent.parent.number // "none")"'
 ```
 
-If `grandparent` comes back as anything other than `none`, **do not split.** Add `needs-human:sizing` to the ticket, comment with the split you would have made and why, and stop. A human decides.
+If `grandparent` comes back as anything other than `none`, **do not split.** Add `needs-human:sizing` to the ticket, comment with the split you would have made and why, then refine it in place as one ticket. **Do not stop and wait for a person.** Once splitting is off the table the only outcomes are refine it now or refine it after an interruption, so the label is a marker for later review rather than a question that has to be answered before the ticket can move.
 
 This is a hard gate, not a preference. It exists because on `pyrycode/pyrycode` every soft rule in that guide, including one written specifically to describe this pattern, failed to stop a recursive split. Measured 2026-09-01: #1925 became #1937, which became #1940, which became #1943 and #1944 — three levels in about seventy minutes, no code written between 03:47 and 05:00, and each child's body longer than the parent it was cut from. The same shape was recorded on the #1714 family on 2026-08-24 and writing it down did not prevent the repeat. A rule that has now failed twice needs a check of a different kind, which is what the query above is.
 
