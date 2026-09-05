@@ -1,6 +1,6 @@
 #!/bin/sh
 # Start the dispatcher in the foreground.
-# Pass-through any args to pnpm (e.g. `pyry-start --silent`).
+# Pass-through any args to the dispatcher (e.g. `pyry-start --silent`).
 #
 # Refuses to start if another dispatcher is already running against the
 # same target repo (lock file at <TARGET_REPO_PATH>/.dispatcher.lock).
@@ -69,47 +69,87 @@ export AGENTS_REPO_PATH="$AGENTS_DIR"
 # See [[Pyrycode/Lessons]] "dotenv loads after repoRoot" entry.
 export TARGET_REPO_PATH="$RESOLVED_TARGET"
 
-# Spawn dispatcher in background so we can capture the actual PID for
-# the lock and clean up on shell exit. `exec` would replace the shell
-# and lose the EXIT trap; we keep the shell alive as a thin lock-holder
-# wrapping the long-lived dispatcher process.
+# The node binary by absolute path, so `ps` (and pyry-status) show which
+# node the dispatcher runs on. Catches the Homebrew-vs-nvm class of bug
+# from 2026-05-03.
+NODE_BIN="$(command -v node)"
+if [ -z "$NODE_BIN" ]; then
+  echo "error: node not found on PATH" >&2
+  exit 1
+fi
+
+# Forward the terminal's signals to the dispatcher BY PID, never by
+# process group. The dispatcher runs in its own group (see the launch
+# below), so this trap is the only way a Ctrl+C reaches it, and the
+# dispatcher's own handler then decides: first press drains, a second
+# press within 5 s force-exits. TERM aimed at this wrapper drains the
+# dispatcher. HUP means the terminal went away; the dispatcher tears
+# its children down on it. Installed before the launch so no window
+# exists in which a press reaches the wrapper's default handler and
+# leaves a stale lock; before the PID is known the forward is a no-op.
+DISPATCHER_PID=""
+forward() { [ -n "$DISPATCHER_PID" ] && kill -"$1" "$DISPATCHER_PID" 2>/dev/null; }
+trap 'forward INT' INT
+trap 'forward TERM' TERM
+trap 'forward HUP' HUP
+trap "rm -f '$LOCK_FILE'" EXIT
+
+# The launch. Three things about this line, each of which has cost a
+# stranded ticket when it was wrong:
 #
-# `op run --env-file=...` resolves any `op://...` secret references
-# from the agents repo's .env at process-launch time and injects the
-# resolved values into the dispatcher's environment. Plaintext secrets
-# stay in 1Password — neither the file on disk nor this wrapper script
-# ever sees them. Existing exports above (AGENTS_REPO_PATH,
-# TARGET_REPO_PATH) pass through op run's env-merge. Requires the
-# 1Password CLI (`op`, Homebrew: `brew install 1password-cli`) with the
-# desktop app's Settings → Developer → "Integrate with 1Password CLI"
-# enabled.
+# 1. `node --import tsx`, NOT the tsx command-line wrapper. The wrapper
+#    runs the dispatcher as a child and relays signals to it, waiting
+#    30 ms for an acknowledgement the dispatcher can only send from a
+#    JavaScript handler. While the dispatcher is inside any synchronous
+#    child call (git pull, worktree add, qmd embed) that handler cannot
+#    run, so the wrapper SIGKILLs it after 60 ms. That was the
+#    2026-09-05 failure: one Ctrl+C five seconds into a gate, no banner,
+#    wip:verifier stranded, worktree left behind. `--import tsx`
+#    registers the same loader inside the one node process, so there is
+#    no relay left to kill us.
 #
-# tsx is invoked DIRECTLY here, NOT via `pnpm start`. Under `op run`,
-# pnpm reacts to the first Ctrl+C (SIGINT) by sending SIGTERM to its
-# script child — which kills tsx (exit 143) and tears the whole stack
-# down BEFORE the dispatcher's own SIGINT handler enters drain mode, so
-# the in-flight dispatch dies mid-run instead of finishing. Reproduced
-# 2026-06-07: `op run -> pnpm -> tsx -> node` injects a spurious SIGTERM
-# on a single Ctrl+C; `op run -> tsx -> node` (and bare `pnpm -> tsx ->
-# node`) drain cleanly. Do NOT reintroduce the `pnpm start` indirection
-# on this launch path. (`pnpm install` above still syncs deps; cwd is
-# the dispatcher dir, so ./node_modules/.bin/tsx resolves.)
-op run --env-file="$AGENTS_DIR/.env" -- ./node_modules/.bin/tsx src/dispatch-bin.ts "$@" &
+# 2. The dispatcher runs in its OWN process group. perl calls setpgrp
+#    and then execs node, so node's pgid is its own pid. The kernel
+#    delivers a terminal Ctrl+C to the foreground process group only,
+#    which is this wrapper and `op run`. Neither the dispatcher nor its
+#    synchronous children (git, gh, qmd) see it. Before this the kernel
+#    also killed whichever git or qmd command happened to be running at
+#    the moment of the press, and the throw from that killed call parked
+#    the ticket or took the poll loop down.
+#
+# 3. `op run` still wraps the launch so `op://` references in .env are
+#    resolved at launch time (see the 2026-07-08 setup-token notes). op
+#    forwards a SIGINT it receives to its child as well, so the
+#    dispatcher can see one press twice a few ms apart; the dispatcher's
+#    500 ms SIGINT debounce exists for exactly that shape.
+#
+# stdin comes from /dev/null: a process outside the foreground group
+# that reads the terminal is stopped with SIGTTIN, and nothing in the
+# dispatcher should ever read the terminal.
+#
+# History of this line: 2026-05-22 moved the claude child into its own
+# group; 2026-06-07 dropped pnpm from the chain because it turned the
+# SIGINT into a SIGTERM; 2026-09-05 dropped the tsx wrapper and moved the
+# dispatcher itself out of the terminal's group. Do not reintroduce a
+# process between `op run` and node.
+op run --env-file="$AGENTS_DIR/.env" -- \
+  /usr/bin/perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; open(STDIN, "<", "/dev/null"); exec @ARGV or die "exec: $!\n";' -- \
+  "$NODE_BIN" --import tsx src/dispatch-bin.ts "$@" &
 LAUNCH_PID=$!
 
-# Find the actual dispatcher node process. op run execs tsx, which
-# spawns the inner node process; pgrep's pattern matches it. Under cross-fork
-# concurrent usage (≥2 dispatchers alive across different agents-fork
-# repos), `pgrep -f ... | head -1` always returns the oldest (lowest)
-# matching PID, not the one this pyry-start spawned. We disambiguate by
-# matching each candidate's `AGENTS_REPO_PATH` env var against our own
-# AGENTS_DIR (which we exported before spawn — see line 60). Retry a
-# few times while node bootstraps; `ps eww` shows env including our
-# exported value for the matching process.
-DISPATCHER_PID=""
+# Find the dispatcher's own PID for the lock: the process whose command
+# line names the entry point, whose environment carries our
+# AGENTS_REPO_PATH (the cross-fork disambiguator, since `pgrep -f`
+# returns every fork's dispatcher), AND which leads its own process
+# group (pgid == pid). The last test is what separates the dispatcher
+# from `op run`, whose command line also contains the pattern and which
+# inherits the same environment. Before 2026-09-05 the lock could record
+# a relay instead of the dispatcher, so pyry-drain signalled the relay.
+# Retry while node bootstraps.
 i=0
-while [ $i -lt 30 ]; do
+while [ $i -lt 50 ]; do
   for pid in $(pgrep -f "tsx.*src/dispatch-bin\.ts" 2>/dev/null); do
+    [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ] || continue
     if ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qx "AGENTS_REPO_PATH=$AGENTS_DIR"; then
       DISPATCHER_PID="$pid"
       break
@@ -119,26 +159,10 @@ while [ $i -lt 30 ]; do
   sleep 0.1
   i=$((i + 1))
 done
-[ -z "$DISPATCHER_PID" ] && DISPATCHER_PID="$LAUNCH_PID"  # fallback
-
-# Register traps BEFORE writing the lock file. If the user presses
-# Ctrl+C between `cat > $LOCK_FILE` and the trap install, the wrapper
-# would exit with default SIGINT handling and leave a stale lock
-# (background op-run/node still alive, but no cleanup). Installing the
-# traps first closes that race window.
-#
-# SIGINT is deliberately *ignored* in this wrapper (the dispatcher
-# catches its own SIGINT and enters drain mode — we don't need the
-# wrapper to react). Without `trap '' INT` the wrapper's INT handler
-# would interrupt `wait` on the first Ctrl+C and the script would
-# exit; the user's interactive shell would then grab the terminal
-# back while op-run/node are still draining, and the in-flight ticket's
-# stdout would bleed into the post-prompt shell.
-#
-# EXIT and TERM fire the lock cleanup. SIGKILL still leaves a stale
-# lock; the next pyry-start detects it and clears.
-trap '' INT
-trap "rm -f '$LOCK_FILE'" EXIT TERM
+if [ -z "$DISPATCHER_PID" ]; then
+  echo "warning: could not find the dispatcher's own PID; lock records the op run PID $LAUNCH_PID and signals go through op" >&2
+  DISPATCHER_PID="$LAUNCH_PID"
+fi
 
 cat > "$LOCK_FILE" <<EOF
 PID=$DISPATCHER_PID
@@ -146,13 +170,17 @@ AGENTS_REPO_PATH=$AGENTS_DIR
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
-# Block until the dispatcher exits. With SIGINT ignored above, `wait`
-# is not interrupted on Ctrl+C, so a single call is enough — no
-# re-wait loop needed. The earlier draft of this fix used a `while
-# kill -0 ...; do wait ...; done` loop as defence-in-depth, but that
-# pattern has a theoretical PID-reuse hazard (reaped PID gets reused
-# by another same-user process within microseconds → kill -0 returns
-# 0, wait returns 127, `|| true` swallows it, tight infinite loop).
-# `2>/dev/null || true` swallows the rare 127-from-not-our-child case
-# that could arise if a stray HUP/USR1 ever lands and a handler runs.
-wait "$LAUNCH_PID" 2>/dev/null || true
+# Block until `op run` (our direct child, so the only pid `wait` can
+# follow) exits, which happens when the dispatcher exits. A trapped
+# signal interrupts `wait` with a status above 128 and runs the trap;
+# loop while the child is still alive. A real exit status above 128,
+# such as the force-exit's 130, ends the loop because `kill -0` then
+# fails; if the pid were ever reused in that instant, `wait` on a
+# non-child returns 127, which also ends it.
+STATUS=0
+wait "$LAUNCH_PID" || STATUS=$?
+while [ "$STATUS" -gt 128 ] && kill -0 "$LAUNCH_PID" 2>/dev/null; do
+  STATUS=0
+  wait "$LAUNCH_PID" || STATUS=$?
+done
+exit "$STATUS"
