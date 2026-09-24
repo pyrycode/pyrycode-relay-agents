@@ -14,3 +14,6 @@ logs/
 # Codegraph index (lives in target repo, but stray dirs sometimes
 # end up here during dev; keep ignored just in case)
 .codegraph/
+
+# Manual .env backups (same secrets as .env — never commit)
+.env.bak-*

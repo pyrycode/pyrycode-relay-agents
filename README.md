@@ -6,16 +6,33 @@ Forked from [`pyrycode/agents`](https://github.com/pyrycode/agents) on 2026-05-0
 
 ## Layout
 
-This repo is checked out as a nested subdirectory of `pyrycode-relay`:
+This repo is a sibling checkout of the target repo (`~/Workspace/Projects/pyrycode-relay-agents` next to `~/Workspace/Projects/pyrycode-relay`); the `.env` points the dispatcher at the target with `TARGET_REPO_PATH`.
 
 ```
-pyrycode-relay/                       (Go repo, public)
-├── cmd/, internal/, docs/, ...
-└── agents/                           (this repo, private; gitignored above)
-    ├── architect/, developer/, ...   (relay-specific agent prompts)
-    ├── bin/                          (pyry-start, pyry-drain, ...)
-    └── dispatcher/                   (submodule → pyrycode/agent-dispatcher)
+pyrycode-relay-agents/
+├── po/CLAUDE.md                # Classic set — Product Owner: ticket refinement, sizing, splitting
+├── architect/CLAUDE.md         # Classic set — Architect: design specs, size enforcement
+├── architect/security-review.md # Classic set — the architect's adversarial checklist
+├── developer/CLAUDE.md         # Classic set — Developer: Go implementation, test-first
+├── qa/CLAUDE.md                # Classic set — QA: make check + make build, baseline comparison
+├── code-review/CLAUDE.md       # Classic set — Code Review: Go idiom, concurrency, security goggles
+├── documentation/CLAUDE.md     # Both sets — Documentation: knowledge base, per-ticket notes, the documentation handoff
+├── refiner/CLAUDE.md           # Builder set — the PO contract under its new name
+├── builder/CLAUDE.md           # Builder set — plan, then implement, in one session
+├── builder/security-review.md  # Builder set — the adversarial checklist on security-sensitive plans
+├── verifier/CLAUDE.md          # Builder set — triage of red gates, then judgment review
+├── bin/                        # pyry-start, pyry-drain, pyry-status, pyry-test, ...
+├── .env.example                # Copy to .env (gitignored)
+└── dispatcher/                 # submodule → pyrycode/agent-dispatcher
 ```
+
+## Stage sets
+
+Two stage sets share this repo. The classic six-agent pipeline (po → architect → developer → qa → code-review → documentation) is the dispatcher's default. `PYRY_STAGE_SET=builder` in `.env` selects the four-role builder set (refiner → builder → verifier → documentation), piloted on pyrycode since 2026-09-01 and running on mobile and desktop since: the builder plans and implements in one session, and the dispatcher runs `PYRY_VERIFIER_GATES="make check;make build"` deterministically in the PR worktree before the verifier spawns. A red gate spawns the verifier in triage mode with the failure attached. Board #3 keeps its In Architecture and In QA columns; the builder set simply never polls them, so drain both columns before switching. See `.env.example` for the knobs.
+
+Rollback is unsetting `PYRY_STAGE_SET` and restarting the dispatcher. The classic prompts stay in the tree for that and are not kept in step with the builder set.
+
+The builder set's rework and status labels (`done:`, `needs-rework:`, `wip:` and `error:` for `refiner`, `builder` and `verifier`) already exist on `pyrycode/pyrycode-relay`.
 
 ## Cloning
 
