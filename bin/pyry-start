@@ -11,6 +11,13 @@ set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Use only the dedicated Automation service account, never a desktop login.
+AUTOMATION_ACCESS="${PYRY_AUTOMATION_ACCESS:-$HOME/.local/bin/automation-access}"
+if [ ! -x "$AUTOMATION_ACCESS" ]; then
+  echo "error: service-account helper missing at $AUTOMATION_ACCESS" >&2
+  exit 1
+fi
+
 if [ ! -d "$AGENTS_DIR/dispatcher" ]; then
   echo "error: dispatcher submodule missing at $AGENTS_DIR/dispatcher" >&2
   echo "       run: cd $AGENTS_DIR && git submodule update --init" >&2
@@ -132,8 +139,8 @@ trap "rm -f '$LOCK_FILE'" EXIT
 # SIGINT into a SIGTERM; 2026-09-05 dropped the tsx wrapper and moved the
 # dispatcher itself out of the terminal's group. Do not reintroduce a
 # process between `op run` and node.
-op run --env-file="$AGENTS_DIR/.env" -- \
-  /usr/bin/perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; open(STDIN, "<", "/dev/null"); exec @ARGV or die "exec: $!\n";' -- \
+"$AUTOMATION_ACCESS" op run --env-file="$AGENTS_DIR/.env" -- \
+  /usr/bin/perl -e 'delete $ENV{OP_SERVICE_ACCOUNT_TOKEN}; setpgrp(0, 0) or die "setpgrp: $!\n"; open(STDIN, "<", "/dev/null"); exec @ARGV or die "exec: $!\n";' -- \
   "$NODE_BIN" --import tsx src/dispatch-bin.ts "$@" &
 LAUNCH_PID=$!
 
@@ -156,6 +163,12 @@ while [ $i -lt 50 ]; do
     fi
   done
   [ -n "$DISPATCHER_PID" ] && break
+  # Preserve authentication failures before a dispatcher exists.
+  if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
+    STATUS=0
+    wait "$LAUNCH_PID" || STATUS=$?
+    exit "$STATUS"
+  fi
   sleep 0.1
   i=$((i + 1))
 done

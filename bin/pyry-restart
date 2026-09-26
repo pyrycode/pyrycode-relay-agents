@@ -24,14 +24,14 @@ LOCK_FILE="$RESOLVED_TARGET/.dispatcher.lock"
 
 if [ ! -f "$LOCK_FILE" ]; then
   echo "no dispatcher running for this fork — starting fresh"
-  exec "$SCRIPT_DIR/pyry-start"
+  exec "$SCRIPT_DIR/pyry-start" "$@"
 fi
 
 LOCKED_PID=$(grep '^PID=' "$LOCK_FILE" | head -1 | cut -d= -f2)
 if [ -z "$LOCKED_PID" ] || ! kill -0 "$LOCKED_PID" 2>/dev/null; then
   echo "stale lock at $LOCK_FILE — clearing and starting fresh"
   rm -f "$LOCK_FILE"
-  exec "$SCRIPT_DIR/pyry-start"
+  exec "$SCRIPT_DIR/pyry-start" "$@"
 fi
 
 echo "draining current dispatcher (PID $LOCKED_PID)..."
@@ -49,4 +49,4 @@ while kill -0 "$LOCKED_PID" 2>/dev/null; do
 done
 
 echo "drain complete in ${WAITED}s — starting fresh"
-exec "$SCRIPT_DIR/pyry-start"
+exec "$SCRIPT_DIR/pyry-start" "$@"
