@@ -7,6 +7,10 @@
 # Catches both same-fork double-start and cross-fork double-start
 # targeting the same project board. Stale locks (holder PID dead) are
 # cleared automatically.
+#
+# In a terminal, Ctrl-C drains and stops. Ctrl-R drains, then runs this
+# script again from disk, so new launcher, dispatcher and .env contents
+# all take effect.
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -94,12 +98,37 @@ fi
 # its children down on it. Installed before the launch so no window
 # exists in which a press reaches the wrapper's default handler and
 # leaves a stale lock; before the PID is known the forward is a no-op.
+# Every trap action must succeed: under `set -e` a failing trap exits
+# this wrapper and leaves the dispatcher running without it.
+#
+# A Ctrl-R restart request is the same drain plus a flag. Ctrl-C or a
+# lost terminal clears the flag, so the dispatcher just stops.
 DISPATCHER_PID=""
-forward() { [ -n "$DISPATCHER_PID" ] && kill -"$1" "$DISPATCHER_PID" 2>/dev/null; }
-trap 'forward INT' INT
+RESTART=""
+STTY_SAVED=""
+forward() { [ -z "$DISPATCHER_PID" ] || kill -"$1" "$DISPATCHER_PID" 2>/dev/null || true; }
+on_int() {
+  if [ -n "$RESTART" ]; then
+    RESTART=""
+    echo "Restart cancelled. The dispatcher stops after the drain."
+  fi
+  forward INT
+}
+request_restart() {
+  if [ -n "$RESTART" ]; then
+    echo "Restart already requested."
+    return 0
+  fi
+  RESTART=1
+  echo ""
+  echo "🔁 Restart requested: draining, then starting again from disk. Ctrl-C cancels the restart."
+  forward TERM
+}
+restore_tty() { [ -z "$STTY_SAVED" ] || stty "$STTY_SAVED" 2>/dev/null || true; }
+trap 'on_int' INT
 trap 'forward TERM' TERM
-trap 'forward HUP' HUP
-trap "rm -f '$LOCK_FILE'" EXIT
+trap 'RESTART=""; forward HUP' HUP
+trap "restore_tty; rm -f '$LOCK_FILE'" EXIT
 
 # The launch. Three things about this line, each of which has cost a
 # stranded ticket when it was wrong:
@@ -183,6 +212,23 @@ AGENTS_REPO_PATH=$AGENTS_DIR
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
+# Watch the terminal for Ctrl-R while the dispatcher runs. The terminal
+# is switched out of line mode so single keys arrive without Enter, and
+# each read gives up after one second so the loop notices the exit.
+# Ctrl-C still raises a signal, because signal keys stay enabled. Only
+# this wrapper reads the terminal; the dispatcher's input is /dev/null.
+if [ -t 0 ]; then
+  STTY_SAVED=$(stty -g)
+  stty -icanon -echo min 0 time 10
+  CTRL_R=$(printf '\022')
+  echo "Ctrl-C drains and stops. Ctrl-R drains and restarts from disk."
+  while kill -0 "$LAUNCH_PID" 2>/dev/null; do
+    KEY=$(dd bs=1 count=1 2>/dev/null) || KEY=""
+    if [ "$KEY" = "$CTRL_R" ]; then request_restart; fi
+  done
+  restore_tty
+fi
+
 # Block until `op run` (our direct child, so the only pid `wait` can
 # follow) exits, which happens when the dispatcher exits. A trapped
 # signal interrupts `wait` with a status above 128 and runs the trap;
@@ -196,4 +242,17 @@ while [ "$STATUS" -gt 128 ] && kill -0 "$LAUNCH_PID" 2>/dev/null; do
   STATUS=0
   wait "$LAUNCH_PID" || STATUS=$?
 done
+
+# Restart only after a clean drain. `exec` replaces this shell with a
+# fresh read of the script, so the EXIT trap does not run; release the
+# lock here instead. The dispatcher arguments carry over unchanged.
+if [ -n "$RESTART" ]; then
+  if [ "$STATUS" -ne 0 ]; then
+    echo "Dispatcher exited with status $STATUS. Not restarting." >&2
+    exit "$STATUS"
+  fi
+  echo "🔁 Drain complete. Starting again."
+  rm -f "$LOCK_FILE"
+  exec "$SCRIPT_DIR/pyry-start" "$@"
+fi
 exit "$STATUS"
