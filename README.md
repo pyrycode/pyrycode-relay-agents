@@ -21,6 +21,8 @@ pyrycode-relay-agents/
 ├── builder/CLAUDE.md           # Builder set — plan, then implement, in one session
 ├── builder/security-review.md  # Builder set — the adversarial checklist on security-sensitive plans
 ├── verifier/CLAUDE.md          # Builder set — triage of red gates, then judgment review
+├── verifier/review-criteria.md # Builder set: review criteria, shared with the preliminary reviewer
+├── verifier/triage.md          # Builder set: red-gate procedure, read only when a gate fails
 ├── bin/                        # pyry-start, pyry-drain, pyry-status, pyry-test, ...
 ├── .env.example                # Copy to .env (gitignored)
 └── dispatcher/                 # submodule → pyrycode/agent-dispatcher
