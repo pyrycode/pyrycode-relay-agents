@@ -18,8 +18,11 @@ pyrycode-relay-agents/
 ├── code-review/CLAUDE.md       # Classic set — Code Review: Go idiom, concurrency, security goggles
 ├── documentation/CLAUDE.md     # Both sets — Documentation: knowledge base, per-ticket notes, the documentation handoff
 ├── refiner/CLAUDE.md           # Builder set — the PO contract under its new name
+├── refiner/splitting.md        # Builder set, read only when splitting or moving a card: split procedure, split-depth gate, board commands
+├── refiner/sizing-evidence.md  # Builder set, rarely read: the measurements behind the refiner's sizing numbers
 ├── builder/CLAUDE.md           # Builder set — plan, then implement, in one session
 ├── builder/security-review.md  # Builder set — the adversarial checklist on security-sensitive plans
+├── builder/handoffs.md         # Builder set, read only when needed: splits, dependency waits, vague tickets, bug filing
 ├── verifier/CLAUDE.md          # Builder set — triage of red gates, then judgment review
 ├── bin/                        # pyry-start, pyry-drain, pyry-status, pyry-test, ...
 ├── .env.example                # Copy to .env (gitignored)
