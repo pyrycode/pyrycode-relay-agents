@@ -53,4 +53,4 @@ When adding a new agent rule, ask: "what deterministic check enforces this if th
 
 ## Shared knowledge
 
-Claude auto memory is disabled for this consumer. Keep workflow lessons in this repository and product lessons in the target repository. Do not use local memory as an additional store.
+Read [shared development practice](docs/working-practice.md). Claude auto memory is disabled for this consumer. Keep workflow lessons in this repository and product lessons in the target repository. Do not use local memory as an additional store.

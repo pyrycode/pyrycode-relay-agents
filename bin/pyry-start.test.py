@@ -26,7 +26,7 @@ class RunnerOptionTests(unittest.TestCase):
                 (root / "target/.dispatcher.lock").write_text("PID=99999999\n")
             (root / ".env").write_text("PYRY_AGENT_RUNNER=" + saved + "\n")
             scripts = {
-                "pnpm": '#!/bin/sh\nif [ "$1" = install ]; then printf install > "$TEST_ROOT/install"; else shift; exec node "$@"; fi\n',
+                "pnpm": '#!/bin/sh\nprintf install > "$TEST_ROOT/install"\n',
                 "automation-access": '''#!/usr/bin/env python3
 import os, sys
 assert sys.argv[1]=='op'
@@ -69,18 +69,45 @@ Path(os.environ['TEST_ROOT'],'result').write_text(json.dumps({'runner':os.enviro
             result = json.loads((root / "result").read_text()) if (root / "result").exists() else None
             return run, result, (root / "install").exists()
 
-    def test_credentials_use_helper_and_service_token_does_not_reach_dispatcher(self):
-        run, result, _ = self.launch([])
+    def test_codex_overrides_saved_claude(self):
+        run, result, _ = self.launch(["--runner", "codex"])
         self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result["runner"], "codex")
         self.assertFalse(result["service_token_present"])
+        self.assertEqual(result["args"], ["--import", "tsx", "src/dispatch-bin.ts"])
 
-    def test_start_and_restart_preserve_literal_arguments(self):
-        for entry in ["pyry-start", "pyry-restart"]:
-            for stale in [False, True]:
-                with self.subTest(entry=entry, stale_lock=stale):
-                    run, result, _ = self.launch(["inbox", "literal $value"], entry=entry, stale_lock=stale)
-                    self.assertEqual(run.returncode, 0, run.stderr)
-                    self.assertEqual(result["args"][-2:], ["inbox", "literal $value"])
+    def test_claude_overrides_saved_codex(self):
+        run, result, _ = self.launch(["--runner=claude"], saved="codex")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result["runner"], "claude")
+
+    def test_omitted_option_keeps_saved_setting(self):
+        run, result, _ = self.launch([], saved="codex")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result["runner"], "codex")
+
+    def test_remaining_arguments_remain_literal(self):
+        prompt = 'Use "quotes" and $(literal)'
+        run, result, _ = self.launch(["--runner", "codex", "inbox", prompt])
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(result["args"][-2:], ["inbox", prompt])
+
+    def test_bad_or_missing_runner_fails_before_install(self):
+        for args in [["--runner"], ["--runner", "typo"], ["--runner="]]:
+            with self.subTest(args=args):
+                run, result, installed = self.launch(args)
+                self.assertEqual(run.returncode, 2)
+                self.assertIsNone(result)
+                self.assertFalse(installed)
+
+    def test_restart_preserves_runner_and_literal_arguments(self):
+        for stale in [False, True]:
+            with self.subTest(stale_lock=stale):
+                run, result, _ = self.launch(["--runner", "codex", "inbox", "literal $value"],
+                                             entry="pyry-restart", stale_lock=stale)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(result["runner"], "codex")
+                self.assertEqual(result["args"][-2:], ["inbox", "literal $value"])
 
     def test_auth_failure_preserves_error_without_misleading_pid_warning(self):
         run, result, _ = self.launch([], auth_fails=True)
@@ -92,6 +119,13 @@ Path(os.environ['TEST_ROOT'],'result').write_text(json.dumps({'runner':os.enviro
         run, result, installed = self.launch([], missing_helper=True)
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("service-account helper", run.stderr)
+        self.assertIsNone(result)
+        self.assertFalse(installed)
+
+    def test_help_does_not_launch(self):
+        run, result, installed = self.launch(["--help"])
+        self.assertEqual(run.returncode, 0)
+        self.assertIn("--runner", run.stdout)
         self.assertIsNone(result)
         self.assertFalse(installed)
 
@@ -204,7 +238,7 @@ os.execv(command[0], command)
 
     def test_ctrl_r_drains_then_starts_again_with_same_arguments(self):
         status, output, launches, signals, locked, lflag = self.run_with_keys(
-            ["inbox", "literal $value"],
+            ["--runner", "codex", "inbox", "literal $value"],
             [("Ctrl-R drains and restarts", self.release),
              ("Ctrl-R drains and restarts", self.key(b"\x12"))])
         self.assertEqual(status, 0, output)
@@ -213,6 +247,7 @@ os.execv(command[0], command)
         self.assertEqual(signals, "TERM")
         self.assertEqual(len(launches), 2, output)
         for launch in launches:
+            self.assertEqual(launch["runner"], "codex")
             self.assertEqual(launch["args"][-2:], ["inbox", "literal $value"])
         self.assertFalse(locked)
         self.assertTrue(lflag & termios.ICANON and lflag & termios.ECHO, "terminal mode not restored")

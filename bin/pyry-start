@@ -1,6 +1,7 @@
 #!/bin/sh
 # Start the dispatcher in the foreground.
-# Pass-through any args to the dispatcher (e.g. `pyry-start --silent`).
+# Select a runner with --runner codex or --runner claude. Remaining args
+# pass through to the dispatcher.
 #
 # Refuses to start if another dispatcher is already running against the
 # same target repo (lock file at <TARGET_REPO_PATH>/.dispatcher.lock).
@@ -14,6 +15,37 @@
 set -e
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 AGENTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Parse launcher options before touching locks or installing dependencies.
+# Stop at the dispatcher command so its arguments remain literal.
+RUNNER_OVERRIDE=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --runner)
+      if [ "$#" -lt 2 ]; then
+        echo "error: --runner requires claude or codex" >&2
+        exit 2
+      fi
+      RUNNER_OVERRIDE="$2"
+      shift 2
+      ;;
+    --runner=*)
+      RUNNER_OVERRIDE="${1#--runner=}"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: pyry-start [--runner claude|codex] [dispatcher arguments...]"
+      echo "The runner option overrides the saved setting for this launch only."
+      exit 0
+      ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+  case "$RUNNER_OVERRIDE" in
+    claude|codex) ;;
+    *) echo "error: --runner requires claude or codex" >&2; exit 2 ;;
+  esac
+done
 
 # Use only the dedicated Automation service account, never a desktop login.
 AUTOMATION_ACCESS="${PYRY_AUTOMATION_ACCESS:-$HOME/.local/bin/automation-access}"
@@ -172,9 +204,11 @@ trap "restore_tty; rm -f '$LOCK_FILE'" EXIT
 # SIGINT into a SIGTERM; 2026-09-05 dropped the tsx wrapper and moved the
 # dispatcher itself out of the terminal's group. Do not reintroduce a
 # process between `op run` and node.
+# Apply the explicit runner inside the existing exec wrapper, after op has
+# loaded .env. No extra process or shell quoting layer is introduced.
 "$AUTOMATION_ACCESS" op run --env-file="$AGENTS_DIR/.env" -- \
-  /usr/bin/perl -e 'delete $ENV{OP_SERVICE_ACCOUNT_TOKEN}; setpgrp(0, 0) or die "setpgrp: $!\n"; open(STDIN, "<", "/dev/null"); exec @ARGV or die "exec: $!\n";' -- \
-  "$NODE_BIN" --import tsx src/dispatch-bin.ts "$@" &
+  /usr/bin/perl -e 'delete $ENV{OP_SERVICE_ACCOUNT_TOKEN}; my $runner = shift @ARGV; $ENV{PYRY_AGENT_RUNNER} = $runner if length $runner; setpgrp(0, 0) or die "setpgrp: $!\n"; open(STDIN, "<", "/dev/null"); exec @ARGV or die "exec: $!\n";' -- \
+  "$RUNNER_OVERRIDE" "$NODE_BIN" --import tsx src/dispatch-bin.ts "$@" &
 LAUNCH_PID=$!
 
 # Find the dispatcher's own PID for the lock: the process whose command
@@ -249,7 +283,8 @@ done
 
 # Restart only after a clean drain. `exec` replaces this shell with a
 # fresh read of the script, so the EXIT trap does not run; release the
-# lock here instead. The dispatcher arguments carry over unchanged.
+# lock here instead. The runner choice and dispatcher arguments carry
+# over unchanged.
 if [ -n "$RESTART" ]; then
   if [ "$STATUS" -ne 0 ]; then
     echo "Dispatcher exited with status $STATUS. Not restarting." >&2
@@ -257,6 +292,11 @@ if [ -n "$RESTART" ]; then
   fi
   echo "🔁 Drain complete. Starting again."
   rm -f "$LOCK_FILE"
+  if [ -n "$RUNNER_OVERRIDE" ]; then
+    set -- --runner "$RUNNER_OVERRIDE" -- "$@"
+  else
+    set -- -- "$@"
+  fi
   exec "$SCRIPT_DIR/pyry-start" "$@"
 fi
 exit "$STATUS"

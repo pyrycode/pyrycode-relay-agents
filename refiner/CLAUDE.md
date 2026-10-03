@@ -7,6 +7,8 @@ Two files live next to this one, in `$AGENTS_REPO_PATH/refiner/`. The dispatcher
 - `splitting.md` holds the split procedure, the split-depth gate and the board commands. Read it before you split a ticket or move one on the board.
 - `sizing-evidence.md` holds the measurements behind the sizing numbers below. Read it only when you doubt a number.
 
+Read the practice shared by every role, `$AGENTS_REPO_PATH/docs/working-practice.md`, before you start; the dispatcher exports that path. It holds the pipeline's principles, where lessons go, the sizing and planning lessons, the GitHub API budget, how to run long commands and what to do when an operation is denied.
+
 ## Repo context
 
 You work on `pyrycode/pyrycode-relay`, the stateless, content-blind WebSocket relay between the `pyry` daemon and its phone and desktop clients. It is one Go module: the binary in `cmd/pyrycode-relay`, with nearly all logic in the single package `internal/relay`. Its board is GitHub project #3 in the `pyrycode` org. These facts shape every ticket.
@@ -55,7 +57,7 @@ Read the existing body first. Even a one-line idea carries intent you must not l
 - For anything on an internet-facing path, read `docs/architecture.md` and the relevant section of `docs/threat-model.md`. A ticket that adds a dependency, a public endpoint or a new deploy target trips that document's *Triggers for re-review*. Name it in the Documentation handoff so the documentation stage carries it.
 - For refactor-shaped work, count call sites before you size it. `codegraph_impact` on the symbol returns direct call sites and transitive dependents in one query; use grep where codegraph is not available. Sizing a rename by eye is how oversized tickets reach the builder.
 - For anything touching the wire contract, read the protocol spec with `gh api repos/pyrycode/pyrycode/contents/docs/protocol-mobile.md -H 'Accept: application/vnd.github.raw'`. It is a REST call, so it does not spend the GraphQL budget. The qmd collection `pyrycode-docs` indexes the daemon's docs, where the spec lives. There is no qmd collection for this repo.
-- For sizing analogues, `docs/knowledge/codebase/<N>.md` says what a past relay ticket built, and its merged PR says what it cost.
+- For sizing analogues, a past relay ticket's plan under `docs/specs/architecture/` says what it built, and its merged PR says what it cost. The per-ticket notes under `docs/knowledge/codebase/`, frozen on 2026-10-03, cover relay tickets up to relay #154.
 - `docs/lessons.md` was frozen on 2026-05-11. Read it only when chasing something specific and old.
 
 ## The target shape
@@ -167,14 +169,3 @@ The dispatcher does not retry. The human sees the ticket back in Inbox with your
 ## Rework mode
 
 A ticket can come back to you with `needs-rework:refiner` from the builder. Read the issue comments to learn why. The common reasons are a split proposal, criteria too vague to plan against, missing context, a missing `Estimate:` line, or a finding that the ticket needs the relay to read a payload. Fix what was asked, splitting per `splitting.md` when that is the request. A payload finding means demoting the ticket to Inbox, as the repo context says. A dependency wait does not come to you: the builder sets an open blocker and the dispatcher holds the ticket in In Development until it closes.
-
-## GitHub API budget
-
-Every dispatcher, agent and interactive session shares one GitHub account and its 5000 GraphQL points an hour. When they run out, every `gh` call in the pipeline fails until the reset.
-
-- To learn a ticket's board column, read the ticket: `gh issue view <n> --json projectItems` costs about 2 points. Listing the board costs about 100 points a page and drained the budget on 2026-09-22. List it at most once a run, and only when you need every card.
-- Check the budget with `gh api graphql -f query='{rateLimit{remaining resetAt}}'`. The `gh api rate_limit` endpoint misreports this bucket.
-
-## When the dispatcher denies an operation
-
-The pipeline is non-interactive, so a question reaches no one. If the dispatcher denies a command, do not try another form of it or ask for permission. Send one message naming the denied operation and what you were trying to achieve, then end the turn. The dispatcher records a recoverable error, applies `error:<agent>:permission_denied` and routes the ticket to operator review. On #398 a run that retried instead burned its budget and stranded its work.
