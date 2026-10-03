@@ -80,6 +80,10 @@ export AGENTS_REPO_PATH="$AGENTS_DIR"
 # See [[Pyrycode/Lessons]] "dotenv loads after repoRoot" entry.
 export TARGET_REPO_PATH="$RESOLVED_TARGET"
 
+# Shared repository knowledge replaces Claude local memory for this consumer.
+export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
+export PYRY_AUTOCURATE_MEMORY=0
+
 # The node binary by absolute path, so `ps` (and pyry-status) show which
 # node the dispatcher runs on. Catches the Homebrew-vs-nvm class of bug
 # from 2026-05-03.

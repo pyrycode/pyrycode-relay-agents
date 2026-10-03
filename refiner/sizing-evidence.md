@@ -2,7 +2,7 @@
 
 The measurements behind the sizing rules in `CLAUDE.md`. Read this only when you doubt a number, or when someone asks for the numbers to be re-measured. Ticket numbers without a repo name are `pyrycode/pyrycode` tickets.
 
-## Where the line and file ceilings come from
+## Where the line ceiling comes from
 
 The ceilings were recalibrated to the builder's budget on 2026-09-02, on pyrycode, and adopted here without relay builder runs behind them. This repo's six-agent PO split at 150 production lines and 3 files, and its architect at about 600 lines of total written work.
 
@@ -10,9 +10,11 @@ For scale, the relay's 30 feature, fix and CI PRs merged from 2026-05-11 to 2026
 
 The older 400-line, 3-file table was set for a developer with 135 turns and 25 minutes. The builder has 200 turns and 40 minutes for plan plus implementation. Across its first 21 runs on pyrycode, 2026-09-01 to 02, no run exhausted either: the median used 60 turns and 14 minutes, the heaviest 127 turns (#1826) and 23 minutes (#1825). The median merged PR in that sample added about 920 lines including spec and docs, so most tickets already landed above the old ceiling and inside a third of the budget. 800 lines sits inside a two-times margin of the heaviest run.
 
+A five-file ceiling on production source files was dropped on 2026-10-03, on every board. File count measured how a change is wired, not how much work it is: one new desktop event type forces a one-line case in about eight files. It did not bound the tail either. Desktop #1249, estimated at 1300 lines over 12 files, built inside the budget.
+
 Line count predicts turns weakly. #1979 landed 964 added lines in 34 turns and #1826 landed 1005 in 127. The ceiling bounds the tail rather than sizing the typical ticket, and the call-site and reject-branch lines bind regardless of line count.
 
-**Re-measure after ten more builder runs before moving either number.** Read turns and duration from the `USAGE` block at the end of each builder log, and grep the logs for `Resume leg`. A run that exhausts a second leg is the first real evidence for tightening. Do not tighten from memory of the old set.
+**Re-measure after ten more builder runs before moving the number.** Read turns and duration from the `USAGE` block at the end of each builder log, and grep the logs for `Resume leg`. A run that exhausts a second leg is the first real evidence for tightening. Do not tighten from memory of the old set.
 
 ## Why total written work, not production lines
 

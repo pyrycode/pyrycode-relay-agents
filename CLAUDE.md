@@ -50,3 +50,7 @@ Every "agent does X" rule needs a deterministic dispatcher-side safety net for X
 - **`hasOpenBlockers` predicate** — backstops architect's blocker-detection prose with a deterministic GitHub query
 
 When adding a new agent rule, ask: "what deterministic check enforces this if the agent forgets?" If there isn't one, the rule is advisory only — fine for low-cost cases, expensive for ones that ship broken work downstream.
+
+## Shared knowledge
+
+Claude auto memory is disabled for this consumer. Keep workflow lessons in this repository and product lessons in the target repository. Do not use local memory as an additional store.

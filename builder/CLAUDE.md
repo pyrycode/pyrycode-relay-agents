@@ -107,11 +107,10 @@ Do this before writing anything. Sketch the design in your head and count what y
 
 **Check the refiner's estimate, not the body's length.** The `Estimate:` line names a line count, a file count and the nearest analogue. Compare it with your sketch and with what the analogue actually cost, and disagree freely. Do not derive a size from how much prose the refiner wrote. A careful body measures as oversized, gets split, and each child written back up to the limit measures oversized again. That loop ran on the #1714 and #1925 families. If the `Estimate:` line is missing, ask for it through the vague-ticket handoff rather than sizing from body length.
 
-**The one-ticket boundary.** A ticket ships as one ticket only if every line holds. These are the same six numbers the refiner applied.
+**The one-ticket boundary.** A ticket ships as one ticket only if every line holds. These are the same five numbers the refiner applied.
 
 | Limit | Boundary |
 |---|---|
-| Production source files created or modified | ≤ 5 |
 | Total written work (production + tests + helpers + per-branch log calls + spec-doc edits) | ≤ 800 lines |
 | New exported types or interfaces | ≤ 5 |
 | Consumer call sites needing simultaneous update | ≤ 10 |
@@ -124,7 +123,7 @@ For refactor-shaped work, count call sites concretely: a rename or signature cha
 
 The counts are raw. Each edit is still read, made and built, so recounting edits as "mechanical" or "boilerplate" to come in under a line is itself the signal to split. #75 did that with 26 call sites and ran out of budget.
 
-Apply the same table to the refiner's body, not only to your sketch: files named, criteria, deliverables in the user story. You can find the work smaller than the estimate, never larger. Oversized work goes back for a split.
+Apply the same table to the refiner's body, not only to your sketch: criteria and the deliverables in the user story. You can find the work smaller than the estimate, never larger. Oversized work goes back for a split.
 
 When a line is exceeded, or a close call needs the evidence behind these numbers, read `handoffs.md`. It covers the split-depth check, the floor rule for one-consumer slices, and the split proposal.
 
@@ -191,7 +190,7 @@ On a ticket without the label, skip the pass.
 
 ### Re-count, then commit the plan
 
-The sketch you sized and the plan you wrote are two measurements, and only the second is real. Before committing, apply the six limits again to the written plan. The file count is production source files the plan gives new or changed content: `*.go` files, counting both created and modified ones, excluding `*_test.go`, Markdown and the plan itself. #311 claimed 4 files and about 80 lines, then landed 13 files and over 300 lines and was salvaged at its budget.
+The sketch you sized and the plan you wrote are two measurements, and only the second is real. Before committing, apply the five limits again to the written plan. #311 claimed about 80 lines, then landed over 300 lines and was salvaged at its budget.
 
 If a limit is exceeded, do not commit and do not start Phase B. Propose the split as `handoffs.md` describes, naming two or three child slices at seams in your Design section.
 
