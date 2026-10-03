@@ -11,7 +11,7 @@ so the dispatcher knows where the consumer's per-agent CLAUDE.md files,
 
 | Script | Purpose |
 |---|---|
-| `pyry-start` | Start the dispatcher in the foreground. Pass-through args to `pnpm`. In its terminal, Ctrl-C drains and stops; Ctrl-R drains and restarts. |
+| `pyry-start` | Start the dispatcher in the foreground. Select with `--runner claude|codex`; pass remaining arguments to the dispatcher. In its terminal, Ctrl-C drains and stops; Ctrl-R drains and restarts. |
 | `pyry-drain` | Send SIGTERM — dispatcher finishes the current dispatch, then exits cleanly. |
 | `pyry-status` | Report whether the dispatcher is running, on which Node binary, and since when. Exit 0 = running, 1 = stopped. |
 | `pyry-restart` | Drain → wait for in-flight dispatch to finish (30 min cap) → start fresh. |
@@ -67,6 +67,35 @@ All configured references are resolved at launch.
 ## Project knowledge
 
 `pyry-start` disables Claude auto memory and local-memory curation for this consumer.
-Workflow lessons belong in this repository and product lessons in the target repository's
-`docs/knowledge/`. The host background curator also skips this fork when its `.env`
-contains `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+The project and role instructions use the shared documentation workflow instead.
+See [shared development practice](../docs/working-practice.md). The host background
+curator also skips this fork when its `.env` contains `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+
+## Agent runner
+
+Select the runner for one launch:
+
+```sh
+./bin/pyry-start --runner codex
+./bin/pyry-start --runner claude
+```
+
+The option overrides `PYRY_AGENT_RUNNER` from the environment or `.env` for that
+launch without changing the saved setting. `--runner=codex` is also accepted.
+Put launcher options before any dispatcher command. With no option, the existing
+saved setting applies; if none is set, Claude remains the default. Use `--help`
+for usage. Invalid or missing runner values fail before startup.
+
+Codex must be installed and authenticated on this host. This repository has no approved Codex write helpers yet, so Codex runs here are untested; see the shared practice. The dispatcher uses
+`gpt-6-sol` by default and inherits the configured effort. Set `PYRY_CODEX_MODEL`
+or `PYRY_CODEX_EFFORT` to override either choice.
+
+Run `python3 bin/pyry-start.test.py` to verify option parsing and precedence with
+mocked dependencies. The tests never start a live dispatcher.
+
+Codex uses workspace sandboxing with automatic approval review. A blocked task
+parks without automatic retry and keeps its worktree. It uses the role's wall-clock
+budget, not Claude's turn budget, and never enters Claude's continuation path.
+The launch still processes the board; it is not a single-ticket mode.
+See [the dispatcher runner documentation](../dispatcher/README.md#selectable-agent-runner)
+for the result contract, limitations and verification.
