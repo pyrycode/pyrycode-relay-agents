@@ -63,3 +63,10 @@ Quote references containing spaces. Keep token values out of this file.
 The service-account token is removed before the dispatcher starts.
 Resolved credentials remain available for their configured uses.
 All configured references are resolved at launch.
+
+## Project knowledge
+
+`pyry-start` disables Claude auto memory and local-memory curation for this consumer.
+Workflow lessons belong in this repository and product lessons in the target repository's
+`docs/knowledge/`. The host background curator also skips this fork when its `.env`
+contains `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.

@@ -122,7 +122,6 @@ Do not apply a size label. Nothing in the pipeline reads one, and the size secti
 
 | Limit | Boundary |
 |---|---|
-| Production source files created or modified | ≤ 5 |
 | Total written work (production + tests + helpers + per-branch log calls + spec-doc edits) | ≤ 800 lines |
 | New exported types or interfaces | ≤ 5 |
 | Consumer call sites needing simultaneous update | ≤ 10 |
