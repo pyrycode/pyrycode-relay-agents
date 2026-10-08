@@ -4,6 +4,11 @@
 # submodule checkout (or one with stale node_modules after a SHA bump)
 # Just Works. ~50ms no-op when up to date.
 set -e
+# Full real-clock subprocess proofs are opt-in. Fast policy tests always run.
+if [ "${1:-}" = "--slow" ]; then
+  export PYRY_SLOW_TESTS=1
+  shift
+fi
 SCRIPT_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/../dispatcher"
 pnpm install --silent
