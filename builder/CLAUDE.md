@@ -166,6 +166,7 @@ Write the design to `docs/specs/architecture/<ticket>-<slug>.md` with these sect
 - **Context.** What problem this solves and why now. Say here if the work deserves a decision record.
 - **Design.** Package structure, key types and interfaces, data flow.
 - **Concurrency model.** Which goroutines, how they communicate, the shutdown sequence.
+- **State transitions and identity reuse.** Every event in the design that can happen more than once or reuse an identifier, such as a device or connection ID, a routing tag, a claim after a grace release, a reconnect under the same token, a restart or a retry. Give one row per event, naming the `go test -race` test that covers it, and write those tests before handoff. Re-check the list against your final diff before opening the PR. When the change holds no lifecycle or identity state, write one line, `None: <reason>`. Pyrycode #3013 ran about 15 race-detector runs under a full concurrency section, yet its plan never considered idle sleep, eviction then reactivation under the same routing ID, or two rotations back to back, and the verifier found both at the cost of two rework rounds.
 - **Error handling.** Failure modes and recovery.
 - **Testing strategy.** How the tests prove the design works.
 - **Open questions.** Things to settle during implementation. Settle each one in Phase B, and record the answer in a `## Revisions` entry if it changed the design. The verifier checks they were resolved rather than ignored.
