@@ -50,34 +50,42 @@ Code review writes PR comments and label updates only. **Never edit these shared
 - `docs/lessons.md` — frozen
 - `docs/knowledge/INDEX.md` — documentation phase appends here, no one else
 
-## Codegraph (use it before grep)
+<!-- CODEGRAPH_START -->
+## CodeGraph
 
-Pyrycode-relay is indexed for codegraph; the `mcp__codegraph__codegraph_*` MCP tools are wired into your tool surface, and the dispatcher symlinks the canonical `.codegraph/` index into your worktree. **Default to codegraph for symbol-level questions; fall back to grep only when codegraph returns no useful results.**
+Adapted from the block CodeGraph 1.6.2 writes into agent instruction files (`src/installer/instructions-template.ts`, github.com/colbymchenry/codegraph).
+
+This repository is indexed by CodeGraph. A ticket worktree gets its own copy of the index, and the codegraph server keeps it in step with your edits within about a second. Reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool:** `codegraph_explore` answers most code questions in one call: the relevant symbols' verbatim, line-numbered source, the call paths between them (including dynamic-dispatch hops grep can't follow) and a blast radius of what depends on them. Name a file or symbol in the query to read its current source. If it is listed but deferred, load it by name via tool search.
+- **Shell (always works):** `codegraph explore "<symbol names or question>"` prints the same output. For a complete list of call sites, `codegraph callers <symbol>`; for transitive dependents, `codegraph impact <symbol>`. The shell reads the index without updating it.
+
+Trust codegraph's results; don't re-verify them with grep. Use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code. If a response starts with a staleness banner or flags a file as changed on disk, Read the files it lists. If there is no `.codegraph/` directory, skip CodeGraph entirely.
+<!-- CODEGRAPH_END -->
 
 For code review specifically, the highest-leverage use is **blast-radius** — finding what the diff doesn't show:
 
-- **For each non-additive change (signature change, removal, behaviour change):** run `codegraph_callers <symbol>` against the symbol's *pre-change* shape. Cross-check that the diff updates every call site. Missed call sites are the highest-cost MUST FIX class because CI catches them late and the developer wastes a turn-cycle.
-- **For each new exported type/function:** run `codegraph_search <name>` to check whether a similar symbol already exists. Duplication-of-pattern is a SHOULD FIX (hurts maintenance) — codegraph spots it deterministically where Read + skim is stochastic.
-- **For each touched file's containing package:** run `codegraph_files` to see the package shape. Helps you judge whether a new file is the right home or just convenient placement.
+- **For each non-additive change (signature change, removal, behaviour change):** run `codegraph_explore` naming the symbol, and shell `codegraph callers <symbol>` for the complete list of call sites. Cross-check that the diff updates every call site. A symbol the branch renamed or removed has no definition in your worktree's index any more, so leftover callers of the OLD name will not show up in the graph: for that case only, search for the old name as text. Missed call sites are the highest-cost MUST FIX class because CI catches them late and the developer wastes a turn-cycle.
+- **For each new exported type/function:** run `codegraph_explore` naming it (or shell `codegraph query <name>`) to check whether a similar symbol already exists. Duplication-of-pattern is a SHOULD FIX (hurts maintenance): codegraph spots it deterministically where Read + skim is stochastic.
+- **For each touched file's containing package:** run shell `codegraph files --filter <dir>` to see the package shape. Helps you judge whether a new file is the right home or just convenient placement.
 
 Other decision rules:
 
-- **"What does this changed function call internally?"** → `codegraph_callees <symbol>` — useful when the diff changes behaviour and you want to verify nothing downstream breaks
-- **"What's the broader context for the area being reviewed?"** → `codegraph_context "<feature area phrase>"` — when the diff spans multiple files and you want a structured map before reading
+- **"What does this changed function call internally?"** → `codegraph_explore` naming the function: its source and call paths show what it calls. Useful when the diff changes behaviour and you want to verify nothing downstream breaks
+- **"What's the broader context for the area being reviewed?"** → `codegraph_explore` with the changed symbols or a question about the area, when the diff spans multiple files and you want a structured map before reading
 
-**When to fall back to grep / Read:**
+**When grep or Read is right:**
 
 - The diff itself — read it via `gh pr diff` not codegraph
 - Comment-only references, string literals, log messages — grep them
 - Test name strings (`t.Run("name")`) — grep
-- Codegraph returned empty results when you expected hits — note the gap, then grep
-- The developer's *new* code (not yet re-indexed in the canonical repo) — Read it directly from the diff
+- A name the branch removed or renamed: grep for the old name to find leftover callers
 
 **Smell phrases that signal you're skipping codegraph for a too-quick review:**
 
 - *"The diff looks straightforward, no need to check callers"* (the diff doesn't show callers — that's the point of the check)
 - *"I'll trust that the developer's tests catch this"* (tests cover what the developer thought of; codegraph catches what they didn't)
-- *"Three call sites are listed in the spec's 'Files to read first', that's the full set"* (verify with `codegraph_callers` — specs miss things, especially for refactor work)
+- *"Three call sites are listed in the spec's 'Files to read first', that's the full set"* (verify with `codegraph callers <symbol>`: specs miss things, especially for refactor work)
 
 **Don't pay for both.** If codegraph answers the question, don't grep. Each tool call is a turn, and code review's turn budget is shared with sub-agents.
 

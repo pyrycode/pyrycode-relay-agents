@@ -29,6 +29,19 @@ This fork shares its pipeline contract with the other Pyrycode forks, and most m
 - Do not add criteria or proofs for a failure nobody has observed. Whether the ticket's own goal is worth doing was the human's call at triage. A rule in an instruction file is cheap, code-level enforcement is expensive, and the second is for observed failures.
 - A safety net for an agent rule must be deterministic code, not another agent rule.
 
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+Adapted from the block CodeGraph 1.6.2 writes into agent instruction files (`src/installer/instructions-template.ts`, github.com/colbymchenry/codegraph).
+
+This repository is indexed by CodeGraph. A ticket worktree gets its own copy of the index, and the codegraph server keeps it in step with your edits within about a second. Reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool:** `codegraph_explore` answers most code questions in one call: the relevant symbols' verbatim, line-numbered source, the call paths between them (including dynamic-dispatch hops grep can't follow) and a blast radius of what depends on them. Name a file or symbol in the query to read its current source. If it is listed but deferred, load it by name via tool search.
+- **Shell (always works):** `codegraph explore "<symbol names or question>"` prints the same output. For a complete list of call sites, `codegraph callers <symbol>`; for transitive dependents, `codegraph impact <symbol>`. The shell reads the index without updating it.
+
+Trust codegraph's results; don't re-verify them with grep. Use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code. If a response starts with a staleness banner or flags a file as changed on disk, Read the files it lists. If there is no `.codegraph/` directory, skip CodeGraph entirely.
+<!-- CODEGRAPH_END -->
+
 ## How a run works
 
 You run without a git worktree, directly in the target repo's checkout on its default branch. Your whole output is issue bodies, comments, labels and board changes. Write no files: the checkout you stand in is the live one the dispatcher creates worktrees and merges from, and nothing commits or cleans up what you leave there. An urge to create a file means you have wandered out of your column.
@@ -55,7 +68,7 @@ Read the existing body first. Even a one-line idea carries intent you must not l
 
 - `docs/PROJECT-MEMORY.md` maps where things live and holds the human-maintained conventions. `docs/knowledge/INDEX.md` and the feature doc under `docs/knowledge/features/` that owns the area say what exists.
 - For anything on an internet-facing path, read `docs/architecture.md` and the relevant section of `docs/threat-model.md`. A ticket that adds a dependency, a public endpoint or a new deploy target trips that document's *Triggers for re-review*. Name it in the Documentation handoff so the documentation stage carries it.
-- For refactor-shaped work, count call sites before you size it. `codegraph_impact` on the symbol returns direct call sites and transitive dependents in one query; use grep where codegraph is not available. Sizing a rename by eye is how oversized tickets reach the builder.
+- For refactor-shaped work, count call sites before you size it. `codegraph_explore` naming the symbol shows its callers per file, and shell `codegraph callers <symbol>` and `codegraph impact <symbol>` give the complete call sites and transitive dependents; use grep where there is no `.codegraph/` directory. Sizing a rename by eye is how oversized tickets reach the builder.
 - For anything touching the wire contract, read the protocol spec with `gh api repos/pyrycode/pyrycode/contents/docs/protocol-mobile.md -H 'Accept: application/vnd.github.raw'`. It is a REST call, so it does not spend the GraphQL budget. The qmd collection `pyrycode-docs` indexes the daemon's docs, where the spec lives. There is no qmd collection for this repo.
 - For sizing analogues, a past relay ticket's plan under `docs/specs/architecture/` says what it built, and its merged PR says what it cost. The per-ticket notes under `docs/knowledge/codebase/`, frozen on 2026-10-03, cover relay tickets up to relay #154.
 - `docs/lessons.md` was frozen on 2026-05-11. Read it only when chasing something specific and old.

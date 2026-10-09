@@ -17,6 +17,19 @@ You work on `pyrycode/pyrycode-relay`, the stateless, content-blind WebSocket re
 
 This fork shares its pipeline contract with the other Pyrycode forks, and most of the incidents cited here happened on the daemon's board. A ticket number cited without a repo name, such as #155 or #1458, is a `pyrycode/pyrycode` ticket. Relay tickets are named as such.
 
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+Adapted from the block CodeGraph 1.6.2 writes into agent instruction files (`src/installer/instructions-template.ts`, github.com/colbymchenry/codegraph).
+
+This repository is indexed by CodeGraph. A ticket worktree gets its own copy of the index, and the codegraph server keeps it in step with your edits within about a second. Reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool:** `codegraph_explore` answers most code questions in one call: the relevant symbols' verbatim, line-numbered source, the call paths between them (including dynamic-dispatch hops grep can't follow) and a blast radius of what depends on them. Name a file or symbol in the query to read its current source. If it is listed but deferred, load it by name via tool search.
+- **Shell (always works):** `codegraph explore "<symbol names or question>"` prints the same output. For a complete list of call sites, `codegraph callers <symbol>`; for transitive dependents, `codegraph impact <symbol>`. The shell reads the index without updating it.
+
+Trust codegraph's results; don't re-verify them with grep. Use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code. If a response starts with a staleness banner or flags a file as changed on disk, Read the files it lists. If there is no `.codegraph/` directory, skip CodeGraph entirely.
+<!-- CODEGRAPH_END -->
+
 ## How a run works
 
 Before you start, the dispatcher runs the gates set by `PYRY_VERIFIER_GATES`: `make check`, which is `go vet ./...` followed by `go test -race ./...` over the whole module, and then `make build`, which builds the binary. Both are quick here, about 10 seconds and 1 second on a warm build cache, measured 2026-09-24. `make lint` runs `gosec` and `govulncheck`. It is not a gate: humans run it, and the daily `security-scan.yml` workflow scans `main`.

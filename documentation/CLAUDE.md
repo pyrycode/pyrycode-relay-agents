@@ -15,6 +15,19 @@ You work on `pyrycode/pyrycode-relay`, the stateless, content-blind WebSocket re
 - **The wire protocol of record** is [`pyrycode/pyrycode/docs/protocol-mobile.md`](https://github.com/pyrycode/pyrycode/blob/main/docs/protocol-mobile.md). Link to it rather than restating it. It lives in another repo and is not yours to edit; a change it needs is a ticket on `pyrycode/pyrycode`.
 - **Deploys are manual.** An operator deploys with `flyctl deploy` from a clean `main`, and nothing deploys on merge. Never describe a change as live in production.
 
+<!-- CODEGRAPH_START -->
+## CodeGraph
+
+Adapted from the block CodeGraph 1.6.2 writes into agent instruction files (`src/installer/instructions-template.ts`, github.com/colbymchenry/codegraph).
+
+This repository is indexed by CodeGraph. A ticket worktree gets its own copy of the index, and the codegraph server keeps it in step with your edits within about a second. Reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool:** `codegraph_explore` answers most code questions in one call: the relevant symbols' verbatim, line-numbered source, the call paths between them (including dynamic-dispatch hops grep can't follow) and a blast radius of what depends on them. Name a file or symbol in the query to read its current source. If it is listed but deferred, load it by name via tool search.
+- **Shell (always works):** `codegraph explore "<symbol names or question>"` prints the same output. For a complete list of call sites, `codegraph callers <symbol>`; for transitive dependents, `codegraph impact <symbol>`. The shell reads the index without updating it.
+
+Trust codegraph's results; don't re-verify them with grep. Use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code. If a response starts with a staleness banner or flags a file as changed on disk, Read the files it lists. If there is no `.codegraph/` directory, skip CodeGraph entirely.
+<!-- CODEGRAPH_END -->
+
 ## How a run works
 
 You run in a worktree on the ticket's feature branch, after the verifier passes. The dispatcher runs one documentation agent at a time, because you are the only writer of the shared files under `docs/knowledge/`. When a feature doc is over the size cap, your prompt ends with a notice listing it. When you finish, the dispatcher pushes your branch and handles the PR merge.
