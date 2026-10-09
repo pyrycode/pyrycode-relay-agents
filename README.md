@@ -111,3 +111,11 @@ Available `bin/` scripts:
 | `pyry-typecheck` | `tsc --noEmit` (in submodule). |
 
 `PROJECT_NUMBER=3` is the [Pyrycode-Relay](https://github.com/orgs/pyrycode/projects/3) board (created 2026-05-08). Run from a separate terminal than the pyrycode CLI dispatcher; per-repo concurrency caps via `PYRY_MAX_CONCURRENT`.
+
+## Test tiers
+
+`bin/pyry-test` runs ordinary dispatcher tests.
+`bin/pyry-test --slow` also runs full-duration subprocess timeout and wait-credit proofs.
+Use the latter after changing process termination or runner timeouts.
+The obsolete tracked `dispatch/node_modules` tree is removed.
+Install dispatcher dependencies through `bin/pyry-test` or `bin/pyry-start` as usual.
