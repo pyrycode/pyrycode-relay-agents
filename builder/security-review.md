@@ -10,7 +10,7 @@ Stop being the designer and read the plan as an attacker would, assuming it has 
 
 Walking the list and marking each category "not applicable" is worth nothing. For each category, either name a concrete finding, with the symbol it lives in or a scenario the plan does not handle, or state the design decision that makes the category not apply. "Nothing user-controlled flows here" is itself a finding under Trust boundaries, naming the symbol that enforces it.
 
-Name the symbol, never the line, because findings outlive the ticket. `docs/threat-model.md` still anchors by `file:line`, so do not copy its anchors. Write ``the header gate in `ClientHandler` ``, and resolve a name with `codegraph_search` if you need to.
+Name the symbol, never the line, because findings outlive the ticket. `docs/threat-model.md` still anchors by `file:line`, so do not copy its anchors. Write ``the header gate in `ClientHandler` ``, and resolve a name with `codegraph_explore` naming the symbol, or shell `codegraph query <name>`, if you need to.
 
 Two documents frame the threats, and neither covers the other. The protocol spec's [Security model](https://github.com/pyrycode/pyrycode/blob/main/docs/protocol-mobile.md#security-model) covers wire-level threats. Read it with `gh api repos/pyrycode/pyrycode/contents/docs/protocol-mobile.md -H 'Accept: application/vnd.github.raw'`. This repo's `docs/threat-model.md` covers the operational surface: deploy, supply chain, denial of service, log hygiene, certificate handling, TLS and error leakage. `docs/security-followups.md` lists what is deliberately deferred and the trigger for each.
 

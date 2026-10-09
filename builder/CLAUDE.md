@@ -93,7 +93,7 @@ Learn enough to design: what the ticket asks, the conventions you must follow, w
 - The issue body, its acceptance criteria, and the refiner's `Estimate:` line at the bottom.
 - The Project-level conventions in `docs/PROJECT-MEMORY.md`. This repo has no separate style guide, so those conventions are it.
 - `docs/knowledge/INDEX.md`, then the feature doc for each area you will touch. It holds what earlier tickets learned in that area.
-- `codegraph_context "<ticket title and paraphrased criteria>"` for the code surface.
+- `codegraph_explore` with the ticket's key symbols or a question about the area, for the code surface.
 - For an internet-facing change, `docs/architecture.md` and the relevant sections of `docs/threat-model.md`.
 - For anything on the wire, the protocol spec's section: `gh api repos/pyrycode/pyrycode/contents/docs/protocol-mobile.md -H 'Accept: application/vnd.github.raw'`. That call uses REST, so it does not spend the GraphQL budget. Cite the spec in the plan rather than restating it.
 
@@ -121,7 +121,7 @@ Do this before writing anything. Sketch the design in your head and count what y
 
 Count total written work, not production lines. Tests, helpers and one log call per reject branch are most of the work, and plans that counted only production code came in three to ten times over.
 
-For refactor-shaped work, count call sites concretely: a rename or signature change, a widely used type replaced, or many imports flipping at once. `codegraph_impact <symbol>` gives the direct call sites and the transitive dependents. Fall back to `grep -rn <symbol> internal/ cmd/` only when codegraph has nothing, for example a very fresh symbol. Above 10 call sites, split. Relay PR #102, the move to `github.com/coder/websocket`, touched 21 files and ran out of budget for this reason, not for its line count.
+For refactor-shaped work, count call sites concretely: a rename or signature change, a widely used type replaced, or many imports flipping at once. `codegraph_explore` naming the symbol shows its callers per file; shell `codegraph callers <symbol>` gives the complete list of call sites and `codegraph impact <symbol>` the transitive dependents. Above 10 call sites, split. Relay PR #102, the move to `github.com/coder/websocket`, touched 21 files and ran out of budget for this reason, not for its line count.
 
 The counts are raw. Each edit is still read, made and built, so recounting edits as "mechanical" or "boilerplate" to come in under a line is itself the signal to split. #75 did that with 26 call sites and ran out of budget.
 
@@ -162,7 +162,7 @@ For a real dependency, follow `handoffs.md` and write no plan.
 
 Write the design to `docs/specs/architecture/<ticket>-<slug>.md` with these sections:
 
-- **Files read.** The reading list behind the design: paths, the symbols that matter, and one line per entry on why. Start it from `codegraph_context` and prune as the design firms up. You are its first reader, because the dispatcher puts the plan back in your prompt on a rework or a resumed leg. The verifier is its second, using it as the map for its review. When a feature doc or ticket note holds something that changes how this ticket should be built, name it here, since a lesson reaches a rework run only if the plan carries it. For example: `internal/relay/registry.go` → `Registry`, the claim, grace and release contract.
+- **Files read.** The reading list behind the design: paths, the symbols that matter, and one line per entry on why. Start it from `codegraph_explore` and prune as the design firms up. You are its first reader, because the dispatcher puts the plan back in your prompt on a rework or a resumed leg. The verifier is its second, using it as the map for its review. When a feature doc or ticket note holds something that changes how this ticket should be built, name it here, since a lesson reaches a rework run only if the plan carries it. For example: `internal/relay/registry.go` → `Registry`, the claim, grace and release contract.
 - **Context.** What problem this solves and why now. Say here if the work deserves a decision record.
 - **Design.** Package structure, key types and interfaces, data flow.
 - **Concurrency model.** Which goroutines, how they communicate, the shutdown sequence.
@@ -285,13 +285,24 @@ Name the symbol, never the line, in the plan and in code comments. Write ``the h
 
 Some older docs, `docs/threat-model.md` among them, and the older specs under `docs/specs/architecture/` still use `file.go:NNN` anchors. Do not copy them.
 
-## Codegraph
+<!-- CODEGRAPH_START -->
+## CodeGraph
 
-The relay is indexed for codegraph, and the dispatcher links the index into your worktree. When the `mcp__codegraph__codegraph_*` tools are available, prefer them for symbol questions, because they return call chains that grep misses:
+Adapted from the block CodeGraph 1.6.2 writes into agent instruction files (`src/installer/instructions-template.ts`, github.com/colbymchenry/codegraph).
 
-- `codegraph_context` at the start, for the design and the plan's Files read.
-- `codegraph_impact` for the call-site count in the size check.
-- `codegraph_callers` before changing a signature, removing an export or renaming a type. A missed call site costs a compile-and-fix cycle.
-- `codegraph_search`, `codegraph_callees` and `codegraph_node` to find an existing pattern to follow.
+This repository is indexed by CodeGraph. A ticket worktree gets its own copy of the index, and the codegraph server keeps it in step with your edits within about a second. Reach for it BEFORE grep/find or reading files when you need to understand or locate code:
 
-Use grep and file reads for comments, string literals such as log messages and `t.Run` names, docs, and your own edits in progress, which the index cannot see. When codegraph returns nothing where you expected hits, note the gap and grep.
+- **MCP tool:** `codegraph_explore` answers most code questions in one call: the relevant symbols' verbatim, line-numbered source, the call paths between them (including dynamic-dispatch hops grep can't follow) and a blast radius of what depends on them. Name a file or symbol in the query to read its current source. If it is listed but deferred, load it by name via tool search.
+- **Shell (always works):** `codegraph explore "<symbol names or question>"` prints the same output. For a complete list of call sites, `codegraph callers <symbol>`; for transitive dependents, `codegraph impact <symbol>`. The shell reads the index without updating it.
+
+Trust codegraph's results; don't re-verify them with grep. Use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code. If a response starts with a staleness banner or flags a file as changed on disk, Read the files it lists. If there is no `.codegraph/` directory, skip CodeGraph entirely.
+<!-- CODEGRAPH_END -->
+
+Where it pays most in this role:
+
+- `codegraph_explore` at the start, for the design and the plan's Files read.
+- Shell `codegraph callers <symbol>` and `codegraph impact <symbol>` for the call-site count in the size check.
+- `codegraph callers <symbol>` before changing a signature, removing an export or renaming a type. A missed call site costs a compile-and-fix cycle. Once you have renamed or removed a symbol, the old name has no definition in the index any more, so its leftover callers will not show up in the graph: for that case only, search for the old name as text.
+- `codegraph_explore` naming a function to find an existing pattern to follow: its source and call paths show what it calls.
+
+Grep is right for comments, string literals such as log messages and `t.Run` names, docs, your own new code, and a name the branch removed.

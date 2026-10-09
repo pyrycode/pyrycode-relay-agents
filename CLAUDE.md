@@ -12,7 +12,7 @@ The dispatcher's pure-function helpers are split across five files; `lib.ts` is 
 |---|---|
 | `dispatcher/src/pipeline-decisions.ts` | Auto-advance rules + decision, rework routing, done-cleanup, post-run labels, label predicates, rework-target extraction, rework-loop circuit breaker, advance-rule lookup |
 | `dispatcher/src/agent-runtime.ts` | `shouldUseWorktree`, `maxTurnsFor`, salvage gating (`shouldAttemptSafeSalvage`, `findReadyPrNumber`, `extractRateLimitInfo`), `SPAWN_ENV_DENYLIST` + `scrubSpawnEnv` |
-| `dispatcher/src/worktree.ts` | `shouldAutoCommit`, `decideCodegraphSymlink`, `decideBranchSetup`, `findWorktreesForBranch`, `resolveAgentsRepoRoot`, `resolveTargetRepoRoot` |
+| `dispatcher/src/worktree.ts` | `shouldAutoCommit`, `decideCodegraphIndexCopy`, `decideBranchSetup`, `findWorktreesForBranch`, `resolveAgentsRepoRoot`, `resolveTargetRepoRoot` |
 | `dispatcher/src/blockers.ts` | `hasOpenBlockers`, `shouldSkipBlockedFor`, `shouldProduceCommits`, `parseCommitsAhead`, `shouldFlagEmptyBranch` |
 | `dispatcher/src/dispatch-selection.ts` | `AGENT_COLUMN_MAP`, `selectDispatches` |
 | `dispatcher/src/lib.ts` | Barrel re-export only (kept one cycle for `dispatch.ts` + tests) |
@@ -23,17 +23,17 @@ Cross-file deps form a clean DAG: pipeline-decisions → blockers; dispatch-sele
 
 ## Use codegraph for dispatcher-side reading
 
-`pyrycode-relay/agents/` is indexed for codegraph (`.codegraph/`, gitignored). Default to `mcp__codegraph__codegraph_*` MCP tools for symbol-level questions before reaching for grep:
+`pyrycode-relay/agents/` is indexed for codegraph (`.codegraph/`, gitignored). Default to the `mcp__codegraph__codegraph_explore` MCP tool for symbol-level questions before reaching for grep:
 
-- **Before changing or removing any exported function** — run `codegraph_callers <name>` to find the call sites across `dispatch.ts`, `reconcile.ts`, sibling lib files, and the test files. The dispatcher's pure-function decomposition means a "small" rename typically fans out to 3–5 sites.
-- **Before extending `dispatch.ts` with a new post-run handler** — run `codegraph_callees <name>` against neighbouring handlers (`decidePostRunLabels`, `runAutoAdvance`, `runReworkRouting`) to mirror their shape.
-- **For "where is this used / what calls what" across the dispatcher** — `codegraph_context "<area phrase>"` returns the entry points + related symbols faster than reading the files end-to-end.
+- **Before changing or removing any exported function**: run `codegraph_explore` naming it, or shell `codegraph callers <name>` for the complete list, to find the call sites across `dispatch.ts`, `reconcile.ts`, sibling lib files, and the test files. The dispatcher's pure-function decomposition means a "small" rename typically fans out to 3 to 5 sites.
+- **Before extending `dispatch.ts` with a new post-run handler**: run `codegraph_explore` naming the neighbouring handlers (`decidePostRunLabels`, `runAutoAdvance`, `runReworkRouting`); their source and call paths show the shape to mirror.
+- **For "where is this used / what calls what" across the dispatcher**: `codegraph_explore` with the symbols or a question about the area returns their source and the call paths between them faster than reading the files end-to-end.
 
-The same fall-back rules apply as in agent CLAUDE.mds: use grep/Read for comments, string literals, docs, or pending edits the canonical index doesn't yet reflect.
+The same rules apply as in agent CLAUDE.mds: use it instead of Read and grep; use grep only for string literals, comments, docs and your own new code.
 
-**Re-index when finished:** the dispatcher's worktree symlink (`decideCodegraphSymlink` in `worktree.ts`) points spawned agents at the canonical `.codegraph/`. After a substantive change to dispatcher source, run `codegraph index -f` from `agents/` so the next dispatcher run sees the new symbols. (`codegraph sync` doesn't always pick up changes — confirmed 2026-05-09.)
+**Re-index when finished:** the dispatcher gives each spawned agent's worktree its own copy of the canonical `.codegraph/` index (`decideCodegraphIndexCopy` in `worktree.ts`), which the agent's codegraph server then catches up with its branch. After a substantive change to dispatcher source, run `codegraph sync` from the repo root (1.x syncs reliably; it fails with a lock error while a codegraph server is running there, which then keeps the index current itself) so the next dispatcher run sees the new symbols.
 
-**Querying from a different cwd (e.g. the vault):** the codegraph MCP tools accept a `projectPath` argument — pass `/Users/<you>/Workspace/Projects/pyrycode-relay/agents` to query the dispatcher from any session, regardless of where Claude Code was launched. Without `projectPath` the MCP server falls back to CWD, which usually isn't the project root.
+**Querying from a different cwd (e.g. the vault):** the `codegraph_explore` MCP tool accepts a `projectPath` argument: pass `/Users/<you>/Workspace/Projects/pyrycode-relay/agents` to query the dispatcher from any session, regardless of where Claude Code was launched. Without `projectPath` the MCP server falls back to CWD, which usually isn't the project root.
 
 ## Test-first
 
