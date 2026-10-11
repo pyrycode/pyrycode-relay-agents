@@ -51,4 +51,4 @@ The pipeline is non-interactive, so a question reaches no one. When the dispatch
 
 ## Codex
 
-Claude is this consumer's default runner. The launcher can select Codex for one launch, but this repository has no approved Codex write helpers yet; the pyrycode, mobile and desktop helpers are fixed to their own repositories. A Codex run's GitHub writes therefore go through approval review, and a denied write follows the section above.
+Codex is the HP dispatcher's configured runner. The launcher can also select Claude. This repository has no approved Codex write helpers yet; the pyrycode, mobile and desktop helpers are fixed to their own repositories. A Codex run's GitHub writes therefore go through approval review, and a denied write follows the section above.
