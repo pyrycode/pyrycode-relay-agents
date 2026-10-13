@@ -95,7 +95,7 @@ fi
 # Keep the submodule's node_modules in sync. Cheap no-op when up to date
 # (~50ms); guarantees a clean restart after a submodule SHA bump.
 cd "$AGENTS_DIR/dispatcher"
-pnpm install --silent
+"$AGENTS_DIR/dispatcher/scripts/install-deps.sh"
 
 # Tell the dispatcher where the consumer's agents repo lives. The
 # dispatcher reads per-agent CLAUDE.md, .env, and writes runtime

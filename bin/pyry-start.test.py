@@ -11,12 +11,22 @@ import termios
 import time
 import unittest
 
+
+REAL_INSTALL_DEPS = Path(__file__).resolve().parents[1] / "dispatcher/scripts/install-deps.sh"
+
+
+def add_install_deps(root):
+    """Copy the real dependency installer. The fake pnpm stands in for the install itself."""
+    (root / "dispatcher/scripts").mkdir(exist_ok=True)
+    shutil.copy2(REAL_INSTALL_DEPS, root / "dispatcher/scripts/install-deps.sh")
+
 class RunnerOptionTests(unittest.TestCase):
     def launch(self, args, saved="claude", entry="pyry-start", auth_fails=False, missing_helper=False, stale_lock=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "bin").mkdir()
             (root / "dispatcher").mkdir()
+            add_install_deps(root)
             (root / "target").mkdir()
             fake = root / "fake"
             fake.mkdir()
@@ -159,6 +169,7 @@ sys.exit(3)
             root = Path(directory)
             for name in ["bin", "dispatcher", "target", "fake"]:
                 (root / name).mkdir()
+            add_install_deps(root)
             shutil.copy2(Path(__file__).with_name("pyry-start"), root / "bin/pyry-start")
             (root / ".env").write_text("PYRY_AGENT_RUNNER=claude\n")
             scripts = {
