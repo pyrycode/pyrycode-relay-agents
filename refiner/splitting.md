@@ -18,6 +18,8 @@ This is a hard gate because soft rules failed to stop recursive splitting twice.
 
 ## Carry out a split
 
+Every board move, order change, blocker, label and close in a split changes orchestrator workflow through the managed GitHub bridge (see Workflow authority in `docs/working-practice.md`). Until the next publication cycle the GitHub board can show a new child in Inbox or at the end of its column. Confirm each step by reading the child back with `gh issue view --repo pyrycode/pyrycode-relay CHILD --json labels,state,projectItems`, not by looking at the board, and read back before repeating a step that reported an error. On 2026-10-13 the bridge saved both children of Mobile #1984 in Backlog, in the right place, while every `board-status` call reported a failure. Sub-issue links and issue bodies stay on GitHub.
+
 Each child gets a body written as if the parent never existed: full scope, full criteria and links to the docs it rests on, such as `docs/architecture.md`, the owning feature doc and the protocol spec section. Do not refer to the parent's plan or sections; each child's builder plans from its own body alone. The only ties to the parent are a `Split from #N` line at the bottom of the body and the sub-issue link.
 
 For each child, in dependency order:
