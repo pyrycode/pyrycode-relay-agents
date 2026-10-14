@@ -208,6 +208,10 @@ git commit -m "spec: <one-line title> (#<ticket>)"
 
 Make each change as simple as it can be and touch only what the ticket needs. Do not refactor neighbouring code. For a non-trivial change, ask whether there is a cleaner way before settling, and skip that for an obvious fix. Do not add a defence for a failure that has not been observed.
 
+### Edits and escalated commands
+
+Under Codex, make file edits with `apply_patch` as their own step, and run `go test`, `go vet` or `go build` as a separate command when it needs `require_escalated`. Never put a file edit, an inline Python or shell rewrite included, in the same command as an escalated validation run. The automatic reviewer then judges the edit script as well, and it can misread one. On pyrycode-mobile #2149 (2026-10-14) it rejected an additive test insert as discarding the file's later tests, and the run stopped with its implementation uncommitted.
+
 ### Tests first
 
 - Write the tests first and watch them fail for the right reason before writing production code. Use table-driven tests for pure logic. For endpoint and forwarding behaviour, use an in-process `httptest` server with real WebSocket dials, following the existing harnesses such as `startClient`, `dialWithClient` and `seedBinary` in `internal/relay`. Tests live in `package relay`, not `relay_test`, so they can use `errors.Is` against unexported sentinels.
