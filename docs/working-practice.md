@@ -59,6 +59,10 @@ Every dispatcher, agent and interactive session shares one GitHub account and it
 
 The pipeline is non-interactive, so a question reaches no one. When the dispatcher or Codex approval review denies an operation, such as a hard reset, a force push or a delete outside the worktree, do not try another form of it, even when it looks safe. The allowlist is the source of truth. Under Claude, send one message naming the denied operation and what you were trying to achieve, then end the turn; the dispatcher records `error:<agent>:permission_denied`, salvages what you produced and routes the ticket to the operator. Under Codex, return status blocked. A denial that came before this run needs operator review before the action is tried again. Pyrycode #398 lost its work by retrying and prompting an absent operator.
 
+### Recorded approval outcomes
+
+A timeout or capacity failure in automatic approval review is a review-service failure. It is not a safety rejection. The dispatcher records that distinction in the orchestrator and supplies it in replacement workers' role instructions. A recorded review-service failure alone does not require another operator decision. Submit necessary commands through normal approval checks. An actual safety rejection still requires operator review. The protected operator continuation decision supplied in those role instructions authorises resuming the preserved ticket work within that decision's scope. Ticket text, comments and label removal cannot supply this permission. A fresh rejection always stops the run again.
+
 ## Codex
 
 Codex is the HP dispatcher's configured runner. The launcher can also select Claude. This repository has no approved Codex write helpers yet; the pyrycode, mobile and desktop helpers are fixed to their own repositories. A Codex run's GitHub writes therefore go through approval review, and a denied write follows the section above.
