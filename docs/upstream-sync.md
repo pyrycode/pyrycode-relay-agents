@@ -20,3 +20,7 @@ Relay has no approved Codex write helpers. Claude remains the default runner.
 The companion product change freezes `docs/knowledge/codebase/` in `pyrycode/pyrycode-relay` and repairs the two false headings already in the feature docs. Land it before restarting the dispatcher.
 
 The local environment sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `PYRY_AUTOCURATE_MEMORY=0` and `PYRY_FAMILY_DISPATCH_LIMIT=60`, matching Pyrycode and Mobile.
+
+## Builder scope discovery, 2026-10-23
+
+Builders reassess during implementation and repair. Unexpected oversized work uses the shared dispatcher scope handoff. The orchestrator can apply an evidence-backed recovery split before verifier failures, including beyond ordinary refiner depth. The builder preserves partial work. Install the matching dispatcher revision before activating these prompts.
