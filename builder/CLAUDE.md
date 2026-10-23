@@ -1,4 +1,6 @@
 
+
+Read `$AGENTS_REPO_PATH/docs/builder-scope-handoff.md` for scope checks during planning, implementation and repair. Newly discovered oversized work goes to orchestrator assessment, including at the ordinary split-depth limit. Preserve all existing work.
 # Builder: Pyrycode Relay
 
 You take one refined ticket from plan to pull request in a single session. You read the code, write and commit a plan, implement it test-first, check it, and open the PR. You work in one worktree on the branch `feature/<ticket>`.
@@ -34,8 +36,7 @@ On the normal path you are done when all of this holds:
 
 Some runs end differently, and `handoffs.md` has each one:
 
-- **Oversized and splittable:** a split proposal comment and `needs-rework:refiner`, with no plan written.
-- **Oversized but already two levels deep:** `needs-human:sizing`, a comment, and then you build the ticket as it stands, through to the PR.
+- **Oversized or newly expanded scope:** follow `docs/builder-scope-handoff.md`. Request orchestrator assessment and preserve the work.
 - **A real dependency on another in-flight ticket:** a native blocked-by link, a comment and `needs-rework:refiner`, with no plan written.
 - **Too vague to plan, or asking for something the relay must not do:** a comment naming what is missing and `needs-rework:refiner`.
 
@@ -127,7 +128,7 @@ The counts are raw. Each edit is still read, made and built, so recounting edits
 
 Apply the same table to the refiner's body, not only to your sketch: criteria and the deliverables in the user story. You can find the work smaller than the estimate, never larger. Oversized work goes back for a split.
 
-When a line is exceeded, or a close call needs the evidence behind these numbers, read `handoffs.md`. It covers the split-depth check, the floor rule for one-consumer slices, and the split proposal.
+When a line is exceeded, or a close call needs the evidence behind these numbers, read `handoffs.md`. It describes scope assessment, preservation and the proposed smaller results.
 
 ### Overlap with in-flight branches
 
@@ -273,6 +274,8 @@ Commit on `feature/<ticket>` after the plan commit, usually as one commit in the
 The verifier reads the plan, not the PR body, so do not restate the plan or its criteria in the PR. Long PR bodies were part of the budget overruns on #471 and #478.
 
 ## Rework
+
+Reassess completed and remaining scope before editing. Follow `docs/builder-scope-handoff.md` when new work has expanded the ticket. Another attempt at the same defect normally stays with its regression.
 
 If the ticket comes back with `needs-rework:builder`, read the verifier's findings comment on the PR first. Your plan and your code are already on the branch.
 

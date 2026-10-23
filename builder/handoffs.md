@@ -6,47 +6,9 @@ If the runtime note appended to your instructions gives an outcome status for a 
 
 Write nothing in the worktree on any of these paths. The dispatcher commits anything left dirty to `feature/<ticket>` and pushes it, so a draft written while sketching ends up as junk on the branch. Bodies and notes go under `/tmp/builder-relay-<ticket>/`.
 
-## Oversized ticket
+## Oversized or newly expanded scope
 
-### Why the limits are where they are
-
-Read this for a close call. The numbers are meant to be applied as raw counts.
-
-- **The 800-line ceiling** was set for the builder's budget on 2026-09-02 on pyrycode, and adopted here without relay builder runs behind them. Across the builder's first 21 runs there, no run exhausted its budget: the median used 60 turns and 14 minutes, the heaviest 127 turns (#1826) and 23 minutes (#1825), and the median merged PR added about 920 lines including spec and docs. 800 lines sits inside a two-times margin of the heaviest run. The older 400-line, 3-file table was set for a smaller developer budget. Do not relax a line by reasoning that you have turns to spare. The failures on the old set were wall-clock and cascade-shaped, and the call-site line binds whatever the line count.
-- **Total written work, not production lines.** On 2026-05-16 three plans applied the old production-only check, concluded they were inside it, and all three were salvaged at their budget. #432 planned about 60 lines and wrote 541 across 14 files. #445 planned about 150 production lines and wrote 2096 in total. #446 planned 75 to 110 and wrote 1071. Tests ran three to five times the production code, helpers 15 to 30 lines each, and per-reject log calls 5 to 10 lines across 10 or more branches. That is why the table counts total work and has a reject-branch line.
-- **Call sites, not lines, on refactors.** #29 renamed an interface across 5 test files with about 35 net production lines and about 30 edits, sized small by lines, and ran out of budget. Relay PR #102 touched 21 files the same way. A refactor usually splits cleanly by introducing the new shape alongside the old, migrating consumers in batches, then removing the old.
-- **Recounting is the warning sign.** #75 counted 26 call sites, called them "mechanical `, nil` appends collapsible to one `replace_all` per file", estimated 12 turns, and proceeded. The cascade ate 30 to 50 turns and the run was salvaged. It should have split into the interface with its default wiring, then the new verb on top. Any time a paragraph recounts something to be "really" under a limit, split. The same goes for treating tests, per-reject log calls or a constructor's validation block as free.
-- **There is no larger size.** Nothing above the table has existed on this pipeline since 2026-05-02. You can find the work smaller than the refiner's estimate, never larger.
-
-### Check the split depth first
-
-Recursive splitting is a measured failure: #1925 became #1937, then #1940, then #1943 and #1944, in about seventy minutes with no code written. So before proposing a split, check whether the ticket is already a grandchild:
-
-```bash
-gh api graphql -f query='query($owner:String!,$repo:String!,$num:Int!){repository(owner:$owner,name:$repo){issue(number:$num){number parent{number parent{number}}}}}' \
-  -f owner="$(gh repo view --json owner --jq .owner.login)" \
-  -f repo="$(gh repo view --json name --jq .name)" \
-  -F num=<TICKET> \
-  --jq '.data.repository.issue | "parent \(.parent.number // "none") grandparent \(.parent.parent.number // "none")"'
-```
-
-If `grandparent` is anything other than `none`, do not split, and do not stop either. Add `needs-human:sizing`, comment with the split you would have made and the measurement behind it, then build the ticket as it stands through to the PR. Once splitting is off the table the only outcomes are building it now or building it after an interruption that ends the same way. #1938, the first ticket to reach this gate, stopped anyway and paid for a full extra run without adding anything to its analysis. The label marks the judgement so a person can find it later. It is not a question someone must answer first, so state your measurement and your reading of it rather than leaving the call to the label.
-
-### Check the floor
-
-A slice whose only deliverable is consumed by exactly one sibling in the same family is part of that sibling, not a ticket. If your proposed split produces a child nothing outside the family calls, merge it back. When the floor and the ceiling disagree, the floor wins: merge the one-consumer slice even if the merged ticket exceeds a line of the table, state the overage in your plan, and build. The ceiling protects against a budget miss, which costs one continuation leg. The floor protects against a ticket that cannot be verified on its own, which no continuation fixes. On the #1720 split, four one-consumer pairs were cut apart to stay under the old ceiling, and ten tickets carried what five would have.
-
-### Propose the split
-
-Post the proposal as a comment on the ticket, then add `needs-rework:refiner` and stop. Do not write a plan for the parent, because it would be thrown away.
-
-> **Oversized — split as follows:**
-> - **A:** [first slice — what behaviour, what interfaces it introduces]
-> - **B:** [second slice — what it consumes from A, what it adds; ...and so on]
->
-> Each child stands alone. The refiner will write a self-contained body for each (no parent plan to reference — there's none). Each child's builder run produces its own plan from its own body.
-
-When the split comes from the re-count of a written plan, name two or three slices at seams in your Design section. Put the proposal only in the comment and do not commit the plan.
+Follow [builder scope reassessment](../docs/builder-scope-handoff.md) before planning, during implementation and on repair. The builder proposes smaller useful results and stops further expansion. The orchestrator assesses the evidence and applies any split. Preserve existing work at every depth. Use `needs_scope_review` on Codex or `error:builder:scope` through the managed workflow bridge on Claude.
 
 ## Real dependency on an in-flight ticket
 
